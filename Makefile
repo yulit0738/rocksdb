@@ -11,6 +11,7 @@ SHELL := $(shell which bash)
 
 CLEAN_FILES = # deliberately empty, so we can append below.
 CFLAGS += ${EXTRA_CFLAGS}
+#YUIL -fpermissive
 CXXFLAGS += ${EXTRA_CXXFLAGS}
 LDFLAGS += $(EXTRA_LDFLAGS)
 MACHINE ?= $(shell uname -m)
@@ -41,7 +42,7 @@ quoted_perl_command = $(subst ','\'',$(perl_command))
 # `make install`
 
 # Set the default DEBUG_LEVEL to 1
-DEBUG_LEVEL?=1
+DEBUG_LEVEL?=0
 
 ifeq ($(MAKECMDGOALS),dbg)
 	DEBUG_LEVEL=2
@@ -277,8 +278,9 @@ endif
 # This (the first rule) must depend on "all".
 default: all
 
-WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
-  -Wno-unused-parameter
+#YUIL all comment
+#WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
+#  -Wno-unused-parameter
 
 ifeq ($(PLATFORM), OS_OPENBSD)
 	WARNING_FLAGS += -Wno-unused-lambda-capture
@@ -320,8 +322,9 @@ ifeq ($(NO_THREEWAY_CRC32C), 1)
 endif
 
 CFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CCFLAGS) $(OPT)
-CXXFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers
-
+#CXXFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual Wnon-virtual-dtor -Wno-missing-field-initializers
+#YUIL
+CXXFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wno-missing-field-initializers
 LDFLAGS += $(PLATFORM_LDFLAGS)
 
 # If NO_UPDATE_BUILD_VERSION is set we don't update util/build_version.cc, but

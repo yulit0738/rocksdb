@@ -262,7 +262,7 @@ class MemTableRepFactory {
 
   // Return true if the current MemTableRep supports concurrent inserts
   // Default: false
-  virtual bool IsInsertConcurrentlySupported() const { return false; }
+  virtual bool IsInsertConcurrentlySupported() const { return true; }
 
   // Return true if the current MemTableRep supports detecting duplicate
   // <key,seq> at insertion time. If true, then MemTableRep::Insert* returns
