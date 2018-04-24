@@ -337,7 +337,7 @@ namespace rocksdb {
 		}
 		void HashCuckooRep::InsertConcurrently(KeyHandle handle) {
 			static const float kMaxFullness = 0.90f;
-
+		CUCKOOCOLLISIONMOD:
 			auto* key = static_cast<char*>(handle);
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
@@ -348,8 +348,7 @@ namespace rocksdb {
 				// Hash 에 바로 넣기 실패했으면 Cuckoo Path 해줘야함.
 				int local_cuckoo_path_[kCuckooPathMaxSearchSteps] = { 0, };
 				cuckoo_path_building_mutex_.lock();
-CUCKOOCOLLISIONMOD:
-				if (FindCuckooPathConcurrently(key, user_key, &cuckoo_path_length, bucket_ids, 
+				if (FindCuckooPathConcurrently(key, user_key, &cuckoo_path_length, bucket_ids,
 					local_cuckoo_path_, initial_hash_id) == false) {
 					// 만약 Path 생성도 실패하고 빈 공간도 없으면
 					// 그냥 Skiplist에 통째로 넣는다. (BackupTable)
@@ -384,6 +383,7 @@ CUCKOOCOLLISIONMOD:
 						InsertIndexData(indexkey, insert_key_bid);
 					} // Swap 실패하면
 					else {
+						cuckoo_path_building_mutex_.unlock();
 						goto CUCKOOCOLLISIONMOD;
 					}
 				}
@@ -447,7 +447,7 @@ CUCKOOCOLLISIONMOD:
 				return;
 			}
 			// when reaching this point, means the insert can be done successfully.
-			occupied_count_.fetch_add(1,std::memory_order_relaxed); // occupied_count_++;
+			occupied_count_.fetch_add(1, std::memory_order_relaxed); // occupied_count_++;
 			if (occupied_count_.load(std::memory_order_relaxed) >= bucket_count_ * kMaxFullness) {
 				is_nearly_full_ = true;
 			}
@@ -504,86 +504,149 @@ CUCKOOCOLLISIONMOD:
 
 		bool HashCuckooRep::QuickInsertConcurrently(const char* internal_key, const Slice& user_key,
 			int bucket_ids[], const int initial_hash_id) {
-			int cuckoo_bucket_id = -1;
-			const char* stored_key=nullptr;
-			bool is_key_update = false;
+			const char* stored_key = nullptr;
+
+			// 일단 Key값에 대해 Hash ID 구함
 			for (unsigned int hid = initial_hash_id; hid < hash_function_count_; ++hid) {
 				bucket_ids[hid] = GetHash(user_key, hid);
-				// since only one PUT is allowed at a time, and this is part of the PUT
-				// operation, so we can safely perform relaxed load.
-				stored_key = cuckoo_array_[bucket_ids[hid]].load(std::memory_order_relaxed);
-				if (stored_key == nullptr) {
-					if (cuckoo_bucket_id == -1) {
-						cuckoo_bucket_id = bucket_ids[hid];
-					}
-				}
-				else {
-					const auto bucket_user_key = UserKey(stored_key);
-					if (bucket_user_key.compare(user_key) == 0) {
-						cuckoo_bucket_id = bucket_ids[hid];
-						is_key_update = true;
-						break;
-					}
-				}
 			}
 
-			if (cuckoo_bucket_id != -1) {
-				if (is_key_update) {
-					// 똑같은 Key (Userkey) 가 있을경우 단순히 Object 포인터만 업데이트해주면됨.
-					// 시퀀스번호, 메타데이터, 벨류를 제외하고 순수 Key에 대해서만 같은경우임
-					// 똑같은키가 있다는 말은 이미 Index list가 구성되어있고 Bucket 번호는 바뀌지않으므로 
-					// Index list를 업데이트 해줄필요 없음
-					//cuckoo_array_[cuckoo_bucket_id].store(const_cast<char*>(internal_key),std::memory_order_release);
-					while (true) {
-						char* st_key = const_cast<char*>(stored_key);
-						if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
-						(st_key,const_cast<char*>(internal_key))) {
-							// Update success then
-							return true;;
-						}
-						else {
-							stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
+			// 해당 Key가 Hash 에 있는지 검사
+			// 만약 2개 이상의 Thread가 검사해서 없다고 판단했다.
+			// 그러면 동시에 똑같은 Hash 에 넣으려고 하겠지
+			// 이때 compare swap 을 해서 먼저 쓰면 한명은 실패 하겠지
+			// 그럼 Retry 를 통해 다시 중복키 검사를 해서 업데이트만 해주면 되고..
+			// 만약 서로 다른 키인데 Bucket ID만 하는거면..
+			// nullptr 인걸 찾아서 쓰게 해줘야하니까..
+
+			while (true) {
+				int cuckoo_bucket_id = -1;
+				bool is_key_update = false;
+				for (unsigned int hid = initial_hash_id; hid < hash_function_count_; ++hid) {
+					stored_key = cuckoo_array_[bucket_ids[hid]].load(std::memory_order_relaxed);
+					if (stored_key == nullptr) {
+						cuckoo_bucket_id = bucket_ids[hid];
+						break;
+					}
+					else {
+						const auto bucket_user_key = UserKey(stored_key);
+						if (bucket_user_key.compare(user_key) == 0) {
+							cuckoo_bucket_id = bucket_ids[hid];
+							is_key_update = true;
+							break;
 						}
 					}
-					return true;
-				} // is_key_update
-				else {
-					// Key 에 들어갈 Bucket ID는 구해진 상태.
-					// 1. BucketID에 Insert 했는데 한번에 성공한 경우에는 그대로 종료
-					// 2. BucketID에 Insert 했는데 실패한경우 다른 BucketID에 시도
-					// 3. 하다가 BucketID가 다찬경우.. Cuckoo Path Build 필요
+				}
 
+				// 빈공간이나 Key-Update가 아님.
+				if (cuckoo_bucket_id == -1) return false;
+
+				if (is_key_update) {
+					// 중복키 업데이트 인경우에..
+					stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
 					char* st_key = const_cast<char*>(stored_key);
+
+					// 업데이트 될때까지 반복
+					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
+					(st_key, const_cast<char*>(internal_key)) != true);
+
+					// 하고나면 끝
+					return true;
+				}
+				else {
+					// 새로 삽입되는 경우
+					// nullptr 이여야만함.
+					// 시도했는데 다른애가 써버리면..
+					// Retry
+					char* st_key = nullptr;
 					if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak(st_key, const_cast<char*>(internal_key))) {
-						// Bucket ID에 대해 성공적으로 업데이트를 했을 때 바로 종료.
+						// 만약 빈공간에 넣는게 성공했으면
 						InsertIndexData(internal_key, cuckoo_bucket_id);
 						return true;
 					}
-
-					// 실패했으면 일단 구해진 BucketID들에 대해 모두 시도해본다.
-					for (unsigned int hid = initial_hash_id; hid < hash_function_count_; ++hid) {
-						// 위에서 우선적으로 구해진 BucketID는 해봤으니까 건너뛰기
-						if (bucket_ids[hid] == cuckoo_bucket_id) continue;
-
-						// 비어져있는 Bucket에 대해 모두 업데이트를 시도해본다.
-						// 시도해서 성공하면 Quick Insert Success!!
-						cuckoo_bucket_id = bucket_ids[hid];
-						stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
-						if (stored_key == nullptr) {
-							st_key = const_cast<char*>(stored_key);
-							if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak(st_key, const_cast<char*>(internal_key))) {
-								InsertIndexData(internal_key, cuckoo_bucket_id);
-								return true;
-							}
-						}
+					else {
+						continue;
 					}
-				} // 중복키 업데이트가 아닐때 end-else
-			}
 
-			// Quick Insert에 실패했다.
-			// Cuckoo Path를 만들어야함.
-			return false;
+				}
+			}
 		}
+	
+			//	// since only one PUT is allowed at a time, and this is part of the PUT
+			//	// operation, so we can safely perform relaxed load.
+			//	stored_key = cuckoo_array_[bucket_ids[hid]].load(std::memory_order_relaxed);
+			//	if (stored_key == nullptr) {
+			//		if (cuckoo_bucket_id == -1) {
+			//			cuckoo_bucket_id = bucket_ids[hid];
+			//		}
+			//	}
+			//	else {
+			//		const auto bucket_user_key = UserKey(stored_key);
+			//		if (bucket_user_key.compare(user_key) == 0) {
+			//			cuckoo_bucket_id = bucket_ids[hid];
+			//			is_key_update = true;
+			//			break;
+			//		}
+			//	}
+			//}
+
+			//if (cuckoo_bucket_id != -1) {
+			//	if (is_key_update) {
+			//		// 똑같은 Key (Userkey) 가 있을경우 단순히 Object 포인터만 업데이트해주면됨.
+			//		// 시퀀스번호, 메타데이터, 벨류를 제외하고 순수 Key에 대해서만 같은경우임
+			//		// 똑같은키가 있다는 말은 이미 Index list가 구성되어있고 Bucket 번호는 바뀌지않으므로 
+			//		// Index list를 업데이트 해줄필요 없음
+			//		//cuckoo_array_[cuckoo_bucket_id].store(const_cast<char*>(internal_key),std::memory_order_release);
+			//		while (true) {
+			//			stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
+			//			char* st_key = const_cast<char*>(stored_key);
+			//			if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
+			//			(st_key,const_cast<char*>(internal_key))) {
+			//				// Update success then
+			//				return true;
+			//			}
+			//			else {
+			//				stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
+			//			}
+			//		}
+			//		return true;
+			//	} // is_key_update
+			//	else {
+			//		// Key 에 들어갈 Bucket ID는 구해진 상태.
+			//		// 1. BucketID에 Insert 했는데 한번에 성공한 경우에는 그대로 종료
+			//		// 2. BucketID에 Insert 했는데 실패한경우 다른 BucketID에 시도
+			//		// 3. 하다가 BucketID가 다찬경우.. Cuckoo Path Build 필요
+
+			//		char* st_key = const_cast<char*>(stored_key);
+			//		if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak(st_key, const_cast<char*>(internal_key))) {
+			//			// Bucket ID에 대해 성공적으로 업데이트를 했을 때 바로 종료.
+			//			InsertIndexData(internal_key, cuckoo_bucket_id);
+			//			return true;
+			//		}
+
+			//		// 실패했으면 일단 구해진 BucketID들에 대해 모두 시도해본다.
+			//		for (unsigned int hid = initial_hash_id; hid < hash_function_count_; ++hid) {
+			//			// 위에서 우선적으로 구해진 BucketID는 해봤으니까 건너뛰기
+
+			//			// 비어져있는 Bucket에 대해 모두 업데이트를 시도해본다.
+			//			// 시도해서 성공하면 Quick Insert Success!!
+			//			int cuckoo_bucket_id = bucket_ids[hid];
+			//			stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
+			//			if (stored_key == nullptr) {
+			//				st_key = const_cast<char*>(stored_key);
+			//				if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak(st_key, const_cast<char*>(internal_key))) {
+			//					InsertIndexData(internal_key, cuckoo_bucket_id);
+			//					return true;
+			//				}
+			//			}
+			//		}
+			//	} // 중복키 업데이트가 아닐때 end-else
+			//}
+
+			//// Quick Insert에 실패했다.
+			//// Cuckoo Path를 만들어야함.
+			//return false;
+	
 
 		bool HashCuckooRep::QuickInsert(const char* internal_key, const Slice& user_key,
 			int bucket_ids[], const int initial_hash_id) {
@@ -776,7 +839,7 @@ CUCKOOCOLLISIONMOD:
 				// again, we can perform no barrier load safely here as the current
 				// thread is the only writer.
 				Slice bucket_user_key =
-					UserKey(cuckoo_array_[step.bucket_id_].load(std::memory_order_relaxed));
+					UserKey(cuckoo_array_[step.bucket_id_].load(std::memory_order_seq_cst));
 				if (step.prev_step_id_ != CuckooStep::kNullStep) {
 					if (bucket_user_key == user_key) {
 						// then there is a loop in the current path, stop discovering this path.
@@ -1698,3 +1761,4 @@ namespace rocksdb {
 #endif  // ROCKSDB_LITE
 
 #endif
+
