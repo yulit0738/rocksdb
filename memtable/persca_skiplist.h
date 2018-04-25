@@ -1,3 +1,7 @@
+// Copyright (c) 2011 The LevelDB Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file. See the AUTHORS file for names of contributors.
+
 #ifndef STORAGE_LEVELDB_DB_SKIPLIST_H_
 #define STORAGE_LEVELDB_DB_SKIPLIST_H_
 
@@ -51,6 +55,7 @@ namespace rocksdb {
 		// REQUIRES: nothing that compares equal to key is currently in the list.
 #ifndef YUIL // Insert() and GettAllSkiplist() Added in skiplist.h
 		void InsertWrappedValue(const Key& key, const unsigned int& value);
+		const char* GetWrappedValue(const Key & key);
 		void Insert(const Key& key, unsigned int val);
 		void GetAllSkiplist();
 		// Return an iterator over the keys in this representation.
@@ -527,6 +532,15 @@ namespace rocksdb {
 
 #ifndef YUIL
 	template<typename Key>
+	const char* PerscaSkipList<Key>::GetWrappedValue(const Key & key) {
+		Node* x = nullptr;
+		x = FindGreaterOrEqual(key, nullptr, nullptr);
+		if(x != nullptr)
+			return x->wrappedkey_.load(std::memory_order_relaxed);
+		return nullptr;
+	}
+
+	template<typename Key>
 	void PerscaSkipList<Key>::InsertWrappedValue(const Key & key, const unsigned int& bucket_id) {
 		// Our Skiplist does not allow duplicated keys insertion.
 		// If value is NULL then It's a deleted Key. 
@@ -589,6 +603,7 @@ namespace rocksdb {
 			done = true;
 		}
 	}
+	
 
 	template<typename Key>
 	void PerscaSkipList<Key>::Insert(const Key& key, unsigned int val) {
