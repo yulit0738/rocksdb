@@ -296,6 +296,9 @@ namespace rocksdb {
 		auto prefix = sizeof(std::atomic<Node*>) * (height - 1);
 		char* mem = arena_->AllocateAligned(prefix + sizeof(Node));
 		Node *x = new (mem) Node(key, value);
+		for (int i = 0; i < height; ++i) {
+			x->NoBarrier_SetNext(i, nullptr);
+		}
 		return x;
 	}
 #else
@@ -420,9 +423,9 @@ namespace rocksdb {
 			}
 			else {
 				//if (x->key != NULL && Equal(key, x->key)) return NULL;
-				if (x->key != NULL && Equal(key, x->key)) return next;
 				if (prev != NULL) prev[level] = x;
 				if (exp != NULL) exp[level] = prev[level]->Next(level);
+				//if (x->key != NULL && Equal(key, x->key)) return next;
 				if (level == 0) {
 					return next;
 				}
@@ -645,6 +648,7 @@ namespace rocksdb {
 					// else retry, possibly exiting the loop because somebody else
 					// increased it
 				}
+
 				Node* newObj = NewNode(key, val, height);
 
 				for (int i = 0; i < height; ++i) {
