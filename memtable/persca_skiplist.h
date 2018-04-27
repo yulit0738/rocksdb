@@ -592,7 +592,6 @@ namespace rocksdb {
 
 				// if height[0] update is failed then retry.
 				if (!(prev[0]->SetNode(exp[0], newObj, 0))) {
-					free(newObj);
 					continue;
 				}
 
