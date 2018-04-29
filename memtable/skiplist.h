@@ -183,7 +183,7 @@ struct SkipList<Key, Comparator>::Node {
   explicit Node(const Key& k) : key(k) { }
   explicit Node(const Key& k, const unsigned int& hid, const int& height) : key(k), hid(hid), height(height) { }
 
-  Key const key;
+  Key key;
   unsigned int hid;
   int height;
 
@@ -596,7 +596,8 @@ void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsig
 	assert(prev_[0]->Next(0) == nullptr || !Equal(key, prev_[0]->Next(0)->key));
 
 	if (prev_ != nullptr && prev_[0]->key != nullptr && EqualUserKey(key, prev_[0]->key)) {
-		// 만약 Key가 똑같으면 Hash id 만 바꾸고 종료
+		// 만약 UserKey가 똑같으면 Hash id 와 Key 업데이트!!
+		prev_[0]->key = key;
 		if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
 		prev_height_ = prev_[0]->height;
 		return;

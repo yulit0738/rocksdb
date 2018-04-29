@@ -1072,16 +1072,15 @@ namespace rocksdb {
 		// Returns the key at the current position.
 		// REQUIRES: Valid()
 		const char* HashCuckooRep::Iterator::key() const {
-			assert(Valid());
-			auto cindex_ = cit_->value();
-			if (cindex_ == static_cast<unsigned int>(bucket_count_)) {
-				return cit_->key();
-			}
-			else {
-				const char* key = cuckoo_array_[cit_->value()].load(std::memory_order_relaxed);
-				return key;
-			}
-
+			//assert(Valid());
+			//auto cindex_ = cit_->value();
+			//if (cindex_ == static_cast<unsigned int>(bucket_count_)) {
+			//	return cit_->key();
+			//}
+			//else {
+			//	return cuckoo_array_[cit_->value()].load(std::memory_order_relaxed);
+			//}
+			return cit_->key();
 		}
 
 		// Advances to the next position.
