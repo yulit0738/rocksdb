@@ -56,6 +56,7 @@ class SkipList {
   // REQUIRES: nothing that compares equal to key is currently in the list.
   void Insert(const Key& key);
   void InsertIndex(const Key& key, const unsigned int& cuckoo_hid);
+  void InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
   void InsertBackupdata(const Key& key, const unsigned int& cuckoo_hid);
 
   // Returns true iff an entry that compares equal to key is in the list.
@@ -143,6 +144,13 @@ class SkipList {
   Node* NewNode(const Key& key, const unsigned int& hid, int height);
   int RandomHeight();
   bool Equal(const Key& a, const Key& b) const { return (compare_(a, b) == 0); }
+  bool EqualUserKey(const Key& a, const Key& b) const {
+	  Slice akey = GetLengthPrefixedSlice(a);
+	  Slice aakey = Slice(akey.data(), akey.size() - 8);
+	  Slice bkey = GetLengthPrefixedSlice(b);
+	  Slice bbkey = Slice(bkey.data(), bkey.size() - 8);
+	  return aakey.compare(bbkey) == 0;
+  }
   bool LessThan(const Key& a, const Key& b) const {
     return (compare_(a, b) < 0);
   }
@@ -173,10 +181,11 @@ class SkipList {
 template<typename Key, class Comparator>
 struct SkipList<Key, Comparator>::Node {
   explicit Node(const Key& k) : key(k) { }
-  explicit Node(const Key& k, const unsigned int& hid) : key(k), hid(hid) { }
+  explicit Node(const Key& k, const unsigned int& hid, const int& height) : key(k), hid(hid), height(height) { }
 
   Key const key;
   unsigned int hid;
+  int height;
 
   // Accessors/mutators for links.  Wrapped in methods so we can
   // add the appropriate barriers as necessary.
@@ -221,7 +230,7 @@ typename SkipList<Key, Comparator>::Node*
 SkipList<Key, Comparator>::NewNode(const Key& key, const unsigned int& hid, int height) {
 	char* mem = allocator_->AllocateAligned(
 		sizeof(Node) + sizeof(std::atomic<Node*>) * (height - 1));
-	return new (mem) Node(key, hid);
+	return new (mem) Node(key, hid, height);
 }
 
 template<typename Key, class Comparator>
@@ -362,7 +371,10 @@ SkipList<Key, Comparator>::FindLessThan(const Key& key, Node** prev) const {
   while (true) {
     assert(x != nullptr);
     Node* next = x->Next(level);
-    assert(x == head_ || next == nullptr || KeyIsAfterNode(next->key, x));
+    //assert(x == head_ || next == nullptr || KeyIsAfterNode(next->key, x));
+	/*if (!(x == head_ || next == nullptr || KeyIsAfterNode(next->key, x))) {
+		printf("Why!?\n");
+	}*/
     assert(x == head_ || KeyIsAfterNode(key, x));
     if (next != last_not_after && KeyIsAfterNode(key, next)) {
       // Keep searching in this list
@@ -529,6 +541,66 @@ void SkipList<Key, Comparator>::InsertIndex(const Key& key, const unsigned int& 
 
 	// Our data structure does not allow duplicate insertion
 	assert(prev_[0]->Next(0) == nullptr || !Equal(key, prev_[0]->Next(0)->key));
+
+	int height = RandomHeight();
+	if (height > GetMaxHeight()) {
+		for (int i = GetMaxHeight(); i < height; i++) {
+			prev_[i] = head_;
+		}
+		//fprintf(stderr, "Change height from %d to %d\n", max_height_, height);
+
+		// It is ok to mutate max_height_ without any synchronization
+		// with concurrent readers.  A concurrent reader that observes
+		// the new value of max_height_ will see either the old value of
+		// new level pointers from head_ (nullptr), or a new value set in
+		// the loop below.  In the former case the reader will
+		// immediately drop to the next level since nullptr sorts after all
+		// keys.  In the latter case the reader will use the new node.
+		max_height_.store(height, std::memory_order_relaxed);
+	}
+
+	Node* x = NewNode(key, cuckoo_hid, height);
+	for (int i = 0; i < height; i++) {
+		// NoBarrier_SetNext() suffices since we will add a barrier when
+		// we publish a pointer to "x" in prev[i].
+		x->NoBarrier_SetNext(i, prev_[i]->NoBarrier_Next(i));
+		prev_[i]->SetNext(i, x);
+	}
+	prev_[0] = x;
+	prev_height_ = height;
+}
+
+template<typename Key, class Comparator>
+void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid) {
+	// fast path for sequential insertion
+	if (!KeyIsAfterNode(key, prev_[0]->NoBarrier_Next(0)) &&
+		(prev_[0] == head_ || KeyIsAfterNode(key, prev_[0]))) {
+		assert(prev_[0] != head_ || (prev_height_ == 1 && GetMaxHeight() == 1));
+
+		// Outside of this method prev_[1..max_height_] is the predecessor
+		// of prev_[0], and prev_height_ refers to prev_[0].  Inside Insert
+		// prev_[0..max_height - 1] is the predecessor of key.  Switch from
+		// the external state to the internal
+		for (int i = 1; i < prev_height_; i++) {
+			prev_[i] = prev_[0];
+		}
+	}
+	else {
+		// TODO(opt): we could use a NoBarrier predecessor search as an
+		// optimization for architectures where memory_order_acquire needs
+		// a synchronization instruction.  Doesn't matter on x86
+		FindLessThan(key, prev_);
+	}
+
+	// Our data structure does not allow duplicate insertion
+	assert(prev_[0]->Next(0) == nullptr || !Equal(key, prev_[0]->Next(0)->key));
+
+	if (prev_ != nullptr && prev_[0]->key != nullptr && EqualUserKey(key, prev_[0]->key)) {
+		// 만약 Key가 똑같으면 Hash id 만 바꾸고 종료
+		if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
+		prev_height_ = prev_[0]->height;
+		return;
+	}
 
 	int height = RandomHeight();
 	if (height > GetMaxHeight()) {

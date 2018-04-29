@@ -1711,12 +1711,16 @@ SnapshotImpl* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
   env_->GetCurrentTime(&unix_time);  // Ignore error
   SnapshotImpl* s = new SnapshotImpl;
 
-  InstrumentedMutexLock l(&mutex_);
   // returns null if the underlying memtable does not support snapshot.
   if (!is_snapshot_supported_) {
     delete s;
     return nullptr;
   }
+  //YUIL - write_group is working so we should wait for consistency
+  
+  Slice SignalToYULCuckoo_GetSnapshot("YUL_UNIQUE_GETSNAPSHOT");
+  Put(WriteOptions(), SignalToYULCuckoo_GetSnapshot, Slice());
+  InstrumentedMutexLock l(&mutex_);
   auto snapshot_seq = last_seq_same_as_publish_seq_
                           ? versions_->LastSequence()
                           : versions_->LastPublishedSequence();
@@ -1747,6 +1751,9 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
       }
     }
   }
+  //YUIL - write_group is working so we should wait for consistency
+  Slice SignalToYULCuckoo_ReleaseSnapshot("YUL_UNIQUE_RELSNAPSHOT");
+  Put(WriteOptions(), SignalToYULCuckoo_ReleaseSnapshot, Slice());
   delete casted_s;
 }
 
