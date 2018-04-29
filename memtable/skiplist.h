@@ -57,7 +57,7 @@ class SkipList {
   void Insert(const Key& key);
   void InsertIndex(const Key& key, const unsigned int& cuckoo_hid);
   void InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
-  void InsertBackupdata(const Key& key, const unsigned int& cuckoo_hid);
+  void InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid);
 
   // Returns true iff an entry that compares equal to key is in the list.
   bool Contains(const Key& key) const;
@@ -629,6 +629,17 @@ void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsig
 	prev_[0] = x;
 	prev_height_ = height;
 }
+
+template<typename Key, class Comparator>
+void SkipList<Key, Comparator>::InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid) {
+	Node *x = FindGreaterOrEqual(key);
+
+	if (x != nullptr && EqualUserKey(key, x->key)) {
+		if (x->hid != cuckoo_hid) x->hid = cuckoo_hid;
+	}
+}
+
+
 
 template<typename Key, class Comparator>
 bool SkipList<Key, Comparator>::Contains(const Key& key) const {
