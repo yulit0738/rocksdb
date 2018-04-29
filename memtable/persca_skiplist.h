@@ -232,7 +232,7 @@ namespace rocksdb {
 	public:
 		explicit Node(const Key& k, unsigned int v, const Key& wk=nullptr) : key(k), value(v), wrappedkey_(wk){ }
 		unsigned int value;
-		Key const key;
+		Key key;
 		std::atomic<Key> wrappedkey_;
 
 		// Accessors/mutators for links.  Wrapped in methods so we can
@@ -625,6 +625,7 @@ namespace rocksdb {
 			// :: UPDATE STATE (DUPLICATED) ::
 			// if key is duplicated then just update value pointer atomically.
 			if (x != NULL && Equal(key, x->key)) {
+				x->key = key;
 				if (x->value != val)x->value = val;
 				return;
 			}

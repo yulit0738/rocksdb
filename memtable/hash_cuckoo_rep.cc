@@ -23,12 +23,10 @@
 #include "util/murmurhash.h"
 // YUIL
 #include "memtable/persca_skiplist.h"
-#include "memtable/concurrentqueue.h"
 #include <chrono>
 #include <thread>
 #include <mutex>
 
-using namespace moodycamel;
 
 namespace rocksdb {
 	namespace {
@@ -244,7 +242,7 @@ namespace rocksdb {
 			// YUIL
 			// queue includes all cuckoo indicies.
 			// all jobs in queue will be done by background thread
-			ConcurrentQueue<const char*> yul_work_queue_;
+			//ConcurrentQueue<const char*> yul_work_queue_;
 
 			// YUIL
 			// all jobs in queue will be done by background thread
@@ -941,14 +939,15 @@ namespace rocksdb {
 		// REQUIRES: Valid()
 		const char* HashCuckooRep::Iterator::key() const {
 			assert(Valid());
-			auto cindex_ = cit_->Value();
-			if (cindex_ == static_cast<unsigned int>(bucket_count_)) {
-				return cit_->WrappedValue();
-			}
-			else {
-				const char* key = cuckoo_array_[cit_->Value()].load(std::memory_order_relaxed);
-				return key;
-			}
+//			auto cindex_ = cit_->Value();
+//			if (cindex_ == static_cast<unsigned int>(bucket_count_)) {
+//				return cit_->WrappedValue();
+//			}
+//			else {
+//				const char* key = cuckoo_array_[cit_->Value()].load(std::memory_order_relaxed);
+//				return key;
+//			}
+		    return cit_->key();
 
 		}
 
