@@ -90,7 +90,7 @@ namespace rocksdb {
 				yul_background_worker_terminate(false),
 				yul_snapshot_count(0),
 				// YUIL
-				KeyIndex_(compare,allocator),
+				KeyIndex_(compare, allocator),
 				//yul_work_queue_ptok_(yul_work_queue_),
 				//yul_work_queue_ctok_(yul_work_queue_),
 				yul_background_worker_done(true) {
@@ -110,7 +110,7 @@ namespace rocksdb {
 				//std::lock_guard<std::mutex> lk(yul_background_worker_mutex);
 			}
 
-		
+
 			// return false, indicating HashCuckooRep does not support merge operator.
 			virtual bool IsMergeOperatorSupported() const override { return false; }
 
@@ -385,7 +385,7 @@ namespace rocksdb {
 			// BackupTable 대신에 Skiplist 사용해서 바로 넣어준다.
 			void InsertBackupData(const char * internal_key, const unsigned int & bucket_id);
 
-			
+
 			// Background Worker는 Queue를 보고 Indexlist를 asynchronous 하게 업데이트 한다.
 		public:
 			//void BackgroundWorker();
@@ -408,7 +408,7 @@ namespace rocksdb {
 				return yul_work_queue_.size_approx();
 			}
 
-			
+
 
 
 			// Returns the pointer to the internal iterator to the buckets where buckets
@@ -416,17 +416,17 @@ namespace rocksdb {
 			// any insert after this function call may affect the sorted nature of
 			// the returned iterator.
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
-				auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) - 
+				auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) -
 					yul_background_worker_written_ops.load(std::memory_order_relaxed);
-			
-					// 만약 Queue 에 반영돼야 할 데이터 남아있으면 깨운다.
-					if (queuesize != 0 && yul_background_worker_done) {
-						yul_background_worker_done = false;
-						yul_background_worker_cv.notify_all();
-						std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-						yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
-					}
-					
+
+				// 만약 Queue 에 반영돼야 할 데이터 남아있으면 깨운다.
+				if (queuesize != 0 && yul_background_worker_done) {
+					yul_background_worker_done = false;
+					yul_background_worker_cv.notify_all();
+					std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+					yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+				}
+
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);
 
@@ -437,8 +437,8 @@ namespace rocksdb {
 					auto mem = arena->AllocateAligned(sizeof(Iterator));
 					return new (mem) Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_));
 				}
-				
-				
+
+
 				//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
 				//yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				////KeyIndex::Iterator it(&KeyIndex_);
@@ -471,22 +471,24 @@ namespace rocksdb {
 				if (bucket != nullptr) {
 					Slice bucket_user_key = UserKey(bucket);
 					if (user_key == bucket_user_key) {
-						Slice mem_key = key.internal_key(); // 이걸사용해야 Seq + meta까지 다 가져옴.
-						// For snapshot support we should compare seq_num with foundkey and inputkey
-						if (yul_snapshot_count == 0 || compare_(bucket, mem_key)>=0) {
-							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
-							callback_func(callback_args, bucket);
-							return;
-						}
-						else if (yul_snapshot_count > 0){
-							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
-							bucket = GetFromIndexTable(key);
-							if (bucket != nullptr) {
-								callback_func(callback_args, bucket);
-								return;
-							}
-							break;
-						}
+						callback_func(callback_args, bucket);
+						break;
+						//Slice mem_key = key.internal_key(); // 이걸사용해야 Seq + meta까지 다 가져옴.
+						//									// For snapshot support we should compare seq_num with foundkey and inputkey
+						//if (yul_snapshot_count == 0 || compare_(bucket, mem_key) >= 0) {
+						//	// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
+						//	callback_func(callback_args, bucket);
+						//	return;
+						//}
+						//else if (yul_snapshot_count > 0) {
+						//	// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
+						//	bucket = GetFromIndexTable(key);
+						//	if (bucket != nullptr) {
+						//		callback_func(callback_args, bucket);
+						//		return;
+						//	}
+						//	break;
+						//}
 					}
 				}
 				else {
@@ -510,29 +512,29 @@ namespace rocksdb {
 
 
 		inline void HashCuckooRep::InsertJob(const IndexJob& job) {
-			static const float kBackgroundworkerThreshhold = 0.15f;
-			yul_work_queue_.enqueue(job);
-			//yul_background_worker_todo_ops.fetch_add(1, std::memory_order_relaxed);
-			yul_background_worker_todo_ops.store(yul_background_worker_todo_ops.load(std::memory_order_relaxed) + 1,
-				std::memory_order_relaxed);
-			auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) - yul_background_worker_written_ops.load(std::memory_order_relaxed);
-			if (yul_background_worker_done &&
-				queuesize >= kQueueThreshhold) {
-				// Background Worker가 자고있으면 일단 다 깨운다~~
-				yul_background_worker_cv.notify_all();
-			}
+			//static const float kBackgroundworkerThreshhold = 0.15f;
+			//yul_work_queue_.enqueue(job);
+			////yul_background_worker_todo_ops.fetch_add(1, std::memory_order_relaxed);
+			//yul_background_worker_todo_ops.store(yul_background_worker_todo_ops.load(std::memory_order_relaxed) + 1,
+			//	std::memory_order_relaxed);
+			//auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) - yul_background_worker_written_ops.load(std::memory_order_relaxed);
+			//if (yul_background_worker_done &&
+			//	queuesize >= kQueueThreshhold) {
+			//	// Background Worker가 자고있으면 일단 다 깨운다~~
+			//	yul_background_worker_cv.notify_all();
+			//}
 		}
 
 		inline void HashCuckooRep::InsertJobConcurrently(const IndexJob& job) {
-			yul_work_queue_.enqueue(job);
-			yul_background_worker_todo_ops.fetch_add(1, std::memory_order_relaxed);
+			//yul_work_queue_.enqueue(job);
+			//yul_background_worker_todo_ops.fetch_add(1, std::memory_order_relaxed);
 
-			auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) - yul_background_worker_written_ops.load(std::memory_order_relaxed);
-			if (yul_background_worker_done &&
-				queuesize >= kQueueThreshhold) {
-				// Background Worker가 자고있으면 일단 다 깨운다~~
-				yul_background_worker_cv.notify_all();
-			}
+			//auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) - yul_background_worker_written_ops.load(std::memory_order_relaxed);
+			//if (yul_background_worker_done &&
+			//	queuesize >= kQueueThreshhold) {
+			//	// Background Worker가 자고있으면 일단 다 깨운다~~
+			//	yul_background_worker_cv.notify_all();
+			//}
 		}
 
 		void HashCuckooRep::InsertConcurrently(KeyHandle handle) {
@@ -543,18 +545,18 @@ namespace rocksdb {
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
-			if (user_key == Slice("YUL_UNIQUE_GETSNAPSHOT")) {
-				yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
-				return;
-			}
-			else if (user_key == Slice("YUL_UNIQUE_RELSNAPSHOT")) {
-				auto snapshot_count = yul_snapshot_count.load(std::memory_order_relaxed);
-				if (snapshot_count > 0) {
-					// 실제 Snapshot이 존재할때만 지운다.
-					yul_snapshot_count.fetch_sub(1, std::memory_order_relaxed);
-				}
-				return;
-			}
+			//if (user_key == Slice("YUL_UNIQUE_GETSNAPSHOT")) {
+			//	yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
+			//	return;
+			//}
+			//else if (user_key == Slice("YUL_UNIQUE_RELSNAPSHOT")) {
+			//	auto snapshot_count = yul_snapshot_count.load(std::memory_order_relaxed);
+			//	if (snapshot_count > 0) {
+			//		// 실제 Snapshot이 존재할때만 지운다.
+			//		yul_snapshot_count.fetch_sub(1, std::memory_order_relaxed);
+			//	}
+			//	return;
+			//}
 			int bucket_ids[HashCuckooRepFactory::kMaxHashCount];
 
 			if (QuickInsertConcurrently(key, user_key, bucket_ids, initial_hash_id) == false) {
@@ -574,7 +576,7 @@ namespace rocksdb {
 					backup_table_->Insert(key);
 					cuckoo_path_building_mutex_.unlock();
 					//InsertBackupData(key, static_cast<unsigned int>(bucket_count_));
-					InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(bucket_count_),kIndexJobBackup));
+					InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(bucket_count_), kIndexJobBackup));
 					is_nearly_full_ = true;
 					return;
 				}
@@ -627,22 +629,22 @@ namespace rocksdb {
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
-			if (user_key == Slice("YUL_UNIQUE_GETSNAPSHOT")) {
-				yul_snapshot_count.store(
-					yul_snapshot_count.load(std::memory_order_relaxed) + 1,
-					std::memory_order_relaxed);
-				return;
-			}
-			else if (user_key == Slice("YUL_UNIQUE_RELSNAPSHOT")) {
-				auto snapshot_count = yul_snapshot_count.load(std::memory_order_relaxed);
-				if (snapshot_count > 0) {
-					// 실제 Snapshot이 존재할때만 지운다.
-					yul_snapshot_count.store(
-						yul_snapshot_count.load(std::memory_order_relaxed) - 1,
-						std::memory_order_relaxed);
-				}
-				return;
-			}
+			//if (user_key == Slice("YUL_UNIQUE_GETSNAPSHOT")) {
+			//	yul_snapshot_count.store(
+			//		yul_snapshot_count.load(std::memory_order_relaxed) + 1,
+			//		std::memory_order_relaxed);
+			//	return;
+			//}
+			//else if (user_key == Slice("YUL_UNIQUE_RELSNAPSHOT")) {
+			//	auto snapshot_count = yul_snapshot_count.load(std::memory_order_relaxed);
+			//	if (snapshot_count > 0) {
+			//		// 실제 Snapshot이 존재할때만 지운다.
+			//		yul_snapshot_count.store(
+			//			yul_snapshot_count.load(std::memory_order_relaxed) - 1,
+			//			std::memory_order_relaxed);
+			//	}
+			//	return;
+			//}
 			// find cuckoo path
 			if (FindCuckooPath(key, user_key, cuckoo_path_, &cuckoo_path_length,
 				initial_hash_id) == false) {
@@ -1231,11 +1233,11 @@ namespace rocksdb {
 			auto queuesize = cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed)
 				- cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed);
 			size_t ops_complete = 0;
-			
+
 			if (queuesize == 0) {
 				/*printf("TODO OPS : %zu WRITTEN OPS : %zu \n",
-					cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
-					cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed));*/
+				cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
+				cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed));*/
 				cuckoo->yul_background_worker_done = true;
 				cuckoo->yul_background_worker_done_cv.notify_all();
 				cuckoo->yul_background_worker_cv.wait(lock);
@@ -1305,8 +1307,8 @@ namespace rocksdb {
 			(average_data_size_ + pointer_size) / kFullness)
 		);
 		//for (int i = 0; i < c->kDefaultMaxBackgroundWorker; ++i) {
-			c->yul_background_worker = new std::thread(BackgroundWorker, c);
-			//}
+		c->yul_background_worker = new std::thread(BackgroundWorker, c);
+		//}
 
 		return c;
 	}
