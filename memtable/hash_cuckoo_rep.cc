@@ -455,7 +455,7 @@ namespace rocksdb {
 		};
 		const char* HashCuckooRep::GetFromIndexTable(const LookupKey& k) {
 			auto iter = GetIterator(nullptr);
-			iter->Seek(k.user_key(), k.internal_key().data());
+			iter->Seek(Slice(), k.memtable_key().data());
 			if (iter->Valid()) {
 				return iter->key();
 			}
