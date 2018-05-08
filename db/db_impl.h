@@ -277,6 +277,10 @@ class DBImpl : public DB {
                                    WriteBatch* my_batch,
                                    WriteCallback* callback);
 
+  // YUIL - Sequence Control
+  void NotifyGetSnapshot(const Slice& key, const Slice& value);
+  void NotifyReleaseSnapshot(const Slice& key, const Slice& value);
+
   // Returns the sequence number that is guaranteed to be smaller than or equal
   // to the sequence number of any key that could be inserted into the current
   // memtables. It can then be assumed that any write with a larger(or equal)
@@ -1130,6 +1134,13 @@ class DBImpl : public DB {
   WriteBufferManager* write_buffer_manager_;
 
   WriteThread write_thread_;
+
+  // YUIL - This is for synchronization between GetSnapshot() (Reader) and WriteImpl (Writer)
+  // When EnterAsBatchGroupLeader() this flag is setted TRUE
+  // When ExitBatchGroup() this flag is setted FALSE
+  std::atomic<bool> yul_write_progressing_;
+  std::atomic<bool> yul_snapshot_progressing_;
+
   WriteBatch tmp_batch_;
   // The write thread when the writers have no memtable write. This will be used
   // in 2PC to batch the prepares separately from the serial commit.

@@ -161,6 +161,9 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       is_snapshot_supported_(true),
       write_buffer_manager_(immutable_db_options_.write_buffer_manager.get()),
       write_thread_(immutable_db_options_),
+	// YUIL - initialize synchronization flag for Snapshot
+	  yul_write_progressing_(false),
+	  yul_snapshot_progressing_(false),
       nonmem_write_thread_(immutable_db_options_),
       write_controller_(mutable_db_options_.delayed_write_rate),
       // Use delayed_write_rate as a base line to determine the initial
@@ -1719,11 +1722,13 @@ SnapshotImpl* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
   //YUIL - write_group is working so we should wait for consistency
   
   Slice SignalToYULCuckoo_GetSnapshot("YUL_UNIQUE_GETSNAPSHOT");
-  Put(WriteOptions(), SignalToYULCuckoo_GetSnapshot, Slice());
+  //Put(WriteOptions(), SignalToYULCuckoo_GetSnapshot, Slice());
+  NotifyGetSnapshot(SignalToYULCuckoo_GetSnapshot, Slice());
   InstrumentedMutexLock l(&mutex_);
   auto snapshot_seq = last_seq_same_as_publish_seq_
                           ? versions_->LastSequence()
                           : versions_->LastPublishedSequence();
+  yul_snapshot_progressing_.store(false, std::memory_order_relaxed);
   return snapshots_.New(s, snapshot_seq, unix_time, is_write_conflict_boundary);
 }
 
@@ -1731,6 +1736,7 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
   const SnapshotImpl* casted_s = reinterpret_cast<const SnapshotImpl*>(s);
   {
     InstrumentedMutexLock l(&mutex_);
+    printf("Release a Snapshot : Sequence Number is %zu\n", casted_s->GetSequenceNumber());
     snapshots_.Delete(casted_s);
     uint64_t oldest_snapshot;
     if (snapshots_.empty()) {
@@ -1753,7 +1759,7 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
   }
   //YUIL - write_group is working so we should wait for consistency
   Slice SignalToYULCuckoo_ReleaseSnapshot("YUL_UNIQUE_RELSNAPSHOT");
-  Put(WriteOptions(), SignalToYULCuckoo_ReleaseSnapshot, Slice());
+  NotifyReleaseSnapshot(SignalToYULCuckoo_ReleaseSnapshot, Slice());
   delete casted_s;
 }
 

@@ -37,6 +37,7 @@
 #include "port/port.h"
 #include "util/allocator.h"
 #include "util/random.h"
+#include "util/yul_util.h"
 
 namespace rocksdb {
 

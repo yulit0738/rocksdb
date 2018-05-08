@@ -161,6 +161,10 @@ class MemTable {
 
   InternalIterator* NewRangeTombstoneIterator(const ReadOptions& read_options);
 
+  // YUIL
+  bool AddForNotifying(SequenceNumber s, ValueType type, const Slice& key,
+	  const Slice& value);
+
   // Add an entry into memtable that maps key to value at the
   // specified sequence number and with the specified type.
   // Typically value will be empty if type==kTypeDeletion.

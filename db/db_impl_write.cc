@@ -54,6 +54,37 @@ Status DBImpl::Write(const WriteOptions& write_options, WriteBatch* my_batch) {
   return WriteImpl(write_options, my_batch, nullptr, nullptr);
 }
 
+// YUIL
+void DBImpl::NotifyGetSnapshot(const Slice& key, const Slice& value) {
+	// Pre-allocate size of write batch conservatively.
+	// 8 bytes are taken by header, 4 bytes for count, 1 byte for type,
+	// and we allocate 11 extra bytes for key length, as well as value length.
+	//WriteBatch batch(key.size() + value.size() + 24);
+	//auto column_family = DefaultColumnFamily();
+	//Status s = batch.Put(column_family, key, value);
+	//if (!s.ok()) {
+	//	return s;
+	//}
+	//WriteThread::Writer w(WriteOptions(), /* WriteOptions*/
+	//	&batch, /* WriteBatch */
+	//	nullptr, /*WriteCallback */
+	//	0, /* log_ref */
+	//	false, /* disable_memtable */
+	//	0, /* batch_cnt */
+	//	nullptr /* pre_release_callback */
+	//);
+	auto memtable = column_family_memtables_.get();
+
+	while (yul_write_progressing_.load(std::memory_order_relaxed));
+	yul_snapshot_progressing_.store(true, std::memory_order_relaxed);
+	memtable->GetMemTable()->AddForNotifying(0, kTypeValue, key, value);
+}
+
+void DBImpl::NotifyReleaseSnapshot(const Slice& key, const Slice& value) {
+	auto memtable = column_family_memtables_.get();
+	memtable->GetMemTable()->AddForNotifying(0, kTypeValue, key, value);
+}
+
 #ifndef ROCKSDB_LITE
 Status DBImpl::WriteWithCallback(const WriteOptions& write_options,
                                  WriteBatch* my_batch,
@@ -173,6 +204,11 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   }
   // else we are the leader of the write batch group
   assert(w.state == WriteThread::STATE_GROUP_LEADER);
+
+  // YUIL - snapshot wating spin lock
+  while (yul_snapshot_progressing_.load(std::memory_order_relaxed));
+  // YUIL - Synchronization bit set
+  yul_write_progressing_.store(true, std::memory_order_relaxed);
 
   // Once reaches this point, the current writer "w" will try to do its write
   // job.  It may also pick up some of the remaining writers in the "writers_"
@@ -390,6 +426,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
     MemTableInsertStatusCheck(w.status);
     write_thread_.ExitAsBatchGroupLeader(write_group, status);
+	// YUIL - Done Group Write
+	yul_write_progressing_.store(false, std::memory_order_relaxed);
   }
 
   if (status.ok()) {

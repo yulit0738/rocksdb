@@ -36,6 +36,7 @@
 #include "util/memory_usage.h"
 #include "util/murmurhash.h"
 #include "util/mutexlock.h"
+#include "util/yul_util.h"
 
 namespace rocksdb {
 
@@ -441,6 +442,38 @@ MemTable::MemTableStats MemTable::ApproximateStats(const Slice& start_ikey,
   }
   uint64_t data_size = data_size_.load(std::memory_order_relaxed);
   return {entry_count * (data_size / n), entry_count};
+}
+
+bool MemTable::AddForNotifying(SequenceNumber s, ValueType type,
+	const Slice& key,
+	const Slice& value) {
+	// Format of an entry is concatenation of:
+	//  key_size     : varint32 of internal_key.size()
+	//  key bytes    : char[internal_key.size()]
+	//  value_size   : varint32 of value.size()
+	//  value bytes  : char[value.size()]
+	uint32_t key_size = static_cast<uint32_t>(key.size());
+	uint32_t val_size = static_cast<uint32_t>(value.size());
+	uint32_t internal_key_size = key_size + 8;
+	const uint32_t encoded_len = VarintLength(internal_key_size) +
+		internal_key_size + VarintLength(val_size) +
+		val_size;
+	char buf[200];
+	std::unique_ptr<MemTableRep>& table =
+		type == kTypeRangeDeletion ? range_del_table_ : table_;
+	KeyHandle handle = buf;
+
+	char* p = EncodeVarint32(buf, internal_key_size);
+	memcpy(p, key.data(), key_size);
+	Slice key_slice(p, key_size);
+	p += key_size;
+	uint64_t packed = PackSequenceAndType(s, type);
+	EncodeFixed64(p, packed);
+	p += 8;
+	p = EncodeVarint32(p, val_size);
+	memcpy(p, value.data(), val_size);
+	assert((unsigned)(p + val_size - buf) == (unsigned)encoded_len);
+	return table->InsertKey(handle);
 }
 
 bool MemTable::Add(SequenceNumber s, ValueType type,
@@ -960,6 +993,8 @@ void MemTableRep::Get(const LookupKey& k, void* callback_args,
        iter->Valid() && callback_func(callback_args, iter->key());
        iter->Next()) {
   }
+	  printf("Found From MemtableRep : ");
+	  PrintKey(iter->key());
 }
 
 void MemTable::RefLogContainingPrepSection(uint64_t log) {
