@@ -43,7 +43,7 @@ namespace rocksdb {
 
 template<typename Key, class Comparator>
 class SkipList {
- private:
+ public:
   struct Node;
 
  public:
@@ -55,11 +55,22 @@ class SkipList {
 
   // Insert key into the list.
   // REQUIRES: nothing that compares equal to key is currently in the list.
-  void Insert(const Key& key);
-  void InsertIndex(const Key& key, const unsigned int& cuckoo_hid);
-  void InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
-  void InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid);
-
+  Node* Insert(const Key& key);
+  Node* InsertIndex(const Key& key, const unsigned int& cuckoo_hid);
+  Node* InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
+  Node* InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid);
+  
+  /*void GetAllSkiplist() const {
+	  Node* x = head_;
+	  Node* next = x->Next(0);
+	  printf("====================================================================================\n");
+	  while (1) {
+		  PrintKey(next->key);
+		  next = next->Next(0);
+		  if (next == NULL)break;
+	  }
+	  printf("====================================================================================\n");
+  }*/
   // Returns true iff an entry that compares equal to key is in the list.
   bool Contains(const Key& key) const;
 
@@ -95,8 +106,12 @@ class SkipList {
     // REQUIRES: Valid()
     void Prev();
 
+	// Invalidate This Iterator
+	void Invalidate();
+
     // Advance to the first entry with a key >= target
     void Seek(const Key& target);
+	void Seek(const Key& target, Node* hint);
 
     // Retreat to the last entry with a key <= target
     void SeekForPrev(const Key& target);
@@ -162,6 +177,8 @@ class SkipList {
   // Returns the earliest node with a key >= key.
   // Return nullptr if there is no such node.
   Node* FindGreaterOrEqual(const Key& key) const;
+
+  Node* FindGreaterOrEqual(const Key& key, Node* hint) const;
 
   // Return the latest node with a key < key.
   // Return head_ if there is no such node.
@@ -269,6 +286,11 @@ inline void SkipList<Key, Comparator>::Iterator::Next() {
 }
 
 template<typename Key, class Comparator>
+inline void SkipList<Key, Comparator>::Iterator::Invalidate() {
+	node_ = nullptr;
+}
+
+template<typename Key, class Comparator>
 inline void SkipList<Key, Comparator>::Iterator::Prev() {
   // Instead of using explicit "prev" links, we just search for the
   // last node that falls before key.
@@ -282,6 +304,11 @@ inline void SkipList<Key, Comparator>::Iterator::Prev() {
 template<typename Key, class Comparator>
 inline void SkipList<Key, Comparator>::Iterator::Seek(const Key& target) {
   node_ = list_->FindGreaterOrEqual(target);
+}
+
+template<typename Key, class Comparator>
+inline void SkipList<Key, Comparator>::Iterator::Seek(const Key& target, Node* hint) {
+	node_ = list_->FindGreaterOrEqual(target, hint);
 }
 
 template <typename Key, class Comparator>
@@ -331,36 +358,97 @@ bool SkipList<Key, Comparator>::KeyIsAfterNode(const Key& key, Node* n) const {
 
 template<typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node* SkipList<Key, Comparator>::
-  FindGreaterOrEqual(const Key& key) const {
-  // Note: It looks like we could reduce duplication by implementing
-  // this function as FindLessThan(key)->Next(0), but we wouldn't be able
-  // to exit early on equality and the result wouldn't even be correct.
-  // A concurrent insert might occur after FindLessThan(key) but before
-  // we get a chance to call Next(0).
-  Node* x = head_;
-  int level = GetMaxHeight() - 1;
-  Node* last_bigger = nullptr;
-  while (true) {
-    assert(x != nullptr);
-    Node* next = x->Next(level);
-    // Make sure the lists are sorted
-    assert(x == head_ || next == nullptr || KeyIsAfterNode(next->key, x));
-    // Make sure we haven't overshot during our search
-    assert(x == head_ || KeyIsAfterNode(key, x));
-    int cmp = (next == nullptr || next == last_bigger)
-        ? 1 : compare_(next->key, key);
-    if (cmp == 0 || (cmp > 0 && level == 0)) {
-      return next;
-    } else if (cmp < 0) {
-      // Keep searching in this list
-      x = next;
-    } else {
-      // Switch to next list, reuse compare_() result
-      last_bigger = next;
-      level--;
-    }
-  }
+FindGreaterOrEqual(const Key& key) const{
+	Node* x = head_;
+	int level = GetMaxHeight() - 1;
+	while (true) {
+		Node* next = x->Next(level);
+		if (KeyIsAfterNode(key, next)) {
+			// Keep searching in this list
+			x = next;
+		}
+		else {
+			//if (prev != NULL) prev[level] = x;
+			if (level == 0) {
+				return next;
+			}
+			else {
+				// Switch to next list
+				level--;
+			}
+		}
+	}
 }
+
+template<typename Key, class Comparator>
+typename SkipList<Key, Comparator>::Node* SkipList<Key, Comparator>::
+FindGreaterOrEqual(const Key& key, Node* hint) const {
+	Node* x = hint == nullptr ? head_ : hint;
+	if (x == head_) {
+		int level = GetMaxHeight() - 1;
+		while (true) {
+			Node* next = x->Next(level);
+			if (KeyIsAfterNode(key, next)) {
+				// Keep searching in this list
+				x = next;
+			}
+			else {
+				//if (prev != NULL) prev[level] = x;
+				if (level == 0) {
+					return next;
+				}
+				else {
+					// Switch to next list
+					level--;
+				}
+			}
+		}
+	}
+	else {
+		// Hint 가 있을땐.. Snapshot만 맞추면됨.
+		int level = 0;
+		while (true) {
+			if (KeyIsAfterNode(key, x)) {
+				x = x->Next(level);
+			}
+			else {
+				return x;
+			}
+		}
+	}
+}
+//template<typename Key, class Comparator>
+//typename SkipList<Key, Comparator>::Node* SkipList<Key, Comparator>::
+//  FindGreaterOrEqual(const Key& key) const {
+//  // Note: It looks like we could reduce duplication by implementing
+//  // this function as FindLessThan(key)->Next(0), but we wouldn't be able
+//  // to exit early on equality and the result wouldn't even be correct.
+//  // A concurrent insert might occur after FindLessThan(key) but before
+//  // we get a chance to call Next(0).
+//  Node* x = head_;
+//  int level = GetMaxHeight() - 1;
+//  Node* last_bigger = nullptr;
+//  while (true) {
+//    assert(x != nullptr);
+//    Node* next = x->Next(level);
+//    // Make sure the lists are sorted
+//    assert(x == head_ || next == nullptr || KeyIsAfterNode(next->key, x));
+//    // Make sure we haven't overshot during our search
+//    assert(x == head_ || KeyIsAfterNode(key, x));
+//    int cmp = (next == nullptr || next == last_bigger)
+//        ? 1 : compare_(next->key, key);
+//    if (cmp == 0 || (cmp > 0 && level == 0)) {
+//      return next;
+//    } else if (cmp < 0) {
+//      // Keep searching in this list
+//      x = next;
+//    } else {
+//      // Switch to next list, reuse compare_() result
+//      last_bigger = next;
+//      level--;
+//    }
+//  }
+//}
 
 template<typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node*
@@ -467,7 +555,8 @@ SkipList<Key, Comparator>::SkipList(const Comparator cmp, Allocator* allocator,
 }
 
 template<typename Key, class Comparator>
-void SkipList<Key, Comparator>::Insert(const Key& key) {
+typename SkipList<Key, Comparator>::Node*
+SkipList<Key, Comparator>::Insert(const Key& key) {
   // fast path for sequential insertion
   if (!KeyIsAfterNode(key, prev_[0]->NoBarrier_Next(0)) &&
       (prev_[0] == head_ || KeyIsAfterNode(key, prev_[0]))) {
@@ -516,10 +605,12 @@ void SkipList<Key, Comparator>::Insert(const Key& key) {
   }
   prev_[0] = x;
   prev_height_ = height;
+  return x;
 }
 
 template<typename Key, class Comparator>
-void SkipList<Key, Comparator>::InsertIndex(const Key& key, const unsigned int& cuckoo_hid) {
+typename SkipList<Key, Comparator>::Node*
+SkipList<Key, Comparator>::InsertIndex(const Key& key, const unsigned int& cuckoo_hid) {
 	// fast path for sequential insertion
 	if (!KeyIsAfterNode(key, prev_[0]->NoBarrier_Next(0)) &&
 		(prev_[0] == head_ || KeyIsAfterNode(key, prev_[0]))) {
@@ -569,10 +660,12 @@ void SkipList<Key, Comparator>::InsertIndex(const Key& key, const unsigned int& 
 	}
 	prev_[0] = x;
 	prev_height_ = height;
+	return x;
 }
 
 template<typename Key, class Comparator>
-void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid) {
+typename SkipList<Key, Comparator>::Node*
+SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid) {
 	// fast path for sequential insertion
 	if (!KeyIsAfterNode(key, prev_[0]->NoBarrier_Next(0)) &&
 		(prev_[0] == head_ || KeyIsAfterNode(key, prev_[0]))) {
@@ -601,7 +694,7 @@ void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsig
 		prev_[0]->key = key;
 		if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
 		prev_height_ = prev_[0]->height;
-		return;
+		return nullptr;
 	}
 
 	int height = RandomHeight();
@@ -630,15 +723,20 @@ void SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsig
 	}
 	prev_[0] = x;
 	prev_height_ = height;
+	return x;
 }
 
 template<typename Key, class Comparator>
-void SkipList<Key, Comparator>::InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid) {
+typename SkipList<Key, Comparator>::Node*
+SkipList<Key, Comparator>::InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid) {
+	// Path modifying 일때 업데이트
+	// Hash Id만 찾아서 업데이트 해주면된다.
 	Node *x = FindGreaterOrEqual(key);
 
 	if (x != nullptr && EqualUserKey(key, x->key)) {
 		if (x->hid != cuckoo_hid) x->hid = cuckoo_hid;
 	}
+	return nullptr;
 }
 
 

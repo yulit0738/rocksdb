@@ -1,9 +1,4 @@
-//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under both the GPLv2 (found in the
-//  COPYING file in the root directory) and Apache 2.0 License
-//  (found in the LICENSE.Apache file in the root directory).
-//
-#ifndef YUIL
+fndef YUIL
 #ifndef ROCKSDB_LITE
 #include "memtable/hash_cuckoo_rep.h"
 #include "memtable/concurrentqueue.h"
@@ -92,16 +87,21 @@ namespace rocksdb {
 				yul_snapshot_count(0),
 				// YUIL
 				KeyIndex_(compare, allocator),
+				yul_index_array_(nullptr),
 				//yul_work_queue_ptok_(yul_work_queue_),
 				//yul_work_queue_ctok_(yul_work_queue_),
 				yul_background_worker_done(true) {
 				char* mem = reinterpret_cast<char*>(
 					allocator_->Allocate(sizeof(std::atomic<const char*>) * bucket_count_));
 				cuckoo_array_ = new (mem) std::atomic<char*>[bucket_count_];
+				char* indexmem = reinterpret_cast<char*>(
+					allocator_->Allocate(sizeof(const char*) * bucket_count_));
+				yul_index_array_ = new (indexmem) KeyIndex::Node*[bucket_count_];
 				for (unsigned int bid = 0; bid < bucket_count_; ++bid) {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
+					yul_index_array_[bid] = nullptr;
 				}
-
+				
 				cuckoo_path_ = reinterpret_cast<int*>(
 					allocator_->Allocate(sizeof(int) * (cuckoo_path_max_depth_ + 1)));
 				is_nearly_full_ = false;
@@ -110,7 +110,6 @@ namespace rocksdb {
 				//}
 				//std::lock_guard<std::mutex> lk(yul_background_worker_mutex);
 			}
-
 
 			// return false, indicating HashCuckooRep does not support merge operator.
 			virtual bool IsMergeOperatorSupported() const override { return false; }
@@ -158,18 +157,21 @@ namespace rocksdb {
 				std::atomic<char*>* cuckoo_array_;
 				unsigned int bucket_count_;
 				std::string tmp_;  // For passing to EncodeKey
+				HashCuckooRep* list_;
 #endif
 
 			public:
 				//YUIL
 				//explicit Iterator(std::shared_ptr<std::vector<const char*>> bucket,
 				//                  const KeyComparator& compare);
-				explicit Iterator(KeyIndex::Iterator* it, const KeyComparator& compare, std::atomic<char*>* cuckoo_arr, const unsigned int& bucket_count_);
+				explicit Iterator(KeyIndex::Iterator* it, const KeyComparator& compare, std::atomic<char*>* cuckoo_arr, const unsigned int& bucket_count_, HashCuckooRep* list);
 
 				// Initialize an iterator over the specified collection.
 				// The returned iterator is not valid.
 				// explicit Iterator(const MemTableRep* collection);
-				virtual ~Iterator() override {};
+				virtual ~Iterator() override {
+					delete cit_;
+				};
 
 				// Returns true iff the iterator is positioned at a valid node.
 				virtual bool Valid() const override;
@@ -268,6 +270,7 @@ namespace rocksdb {
 			//std::shared_ptr<MemTableRep> backup_table_;
 			// the array to store pointers, pointing to the actual data.
 			std::atomic<char*>* cuckoo_array_;
+			// the array to stroe pointers, pointing to the index data in skiplist.
 			// a buffer to store cuckoo path
 			int* cuckoo_path_;
 			// a boolean flag indicating whether the fullness of bucket array
@@ -330,7 +333,7 @@ namespace rocksdb {
 
 			// YUIL
 			KeyIndex KeyIndex_;
-
+			KeyIndex::Node** yul_index_array_;
 
 			// returns the bucket id assogied to the input slice based on the
 			unsigned int GetHash(const Slice& slice, const int hash_func_id) const {
@@ -378,13 +381,13 @@ namespace rocksdb {
 
 			// YUIL
 			// Index List(Persca Skiplist)에 Bucket Key와 Index 삽입
-			void InsertIndexData(const char* internal_key, const unsigned int& bucket_id);
+			KeyIndex::Node* InsertIndexData(const char* internal_key, const unsigned int& bucket_id);
 			// Index List 에 Key와 Index를 덮어쓴다. (Append 하지 않음)
-			void InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id);
+			KeyIndex::Node* InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id);
 			// Cuckoo 해쉬 Collision 해결할때.. Seq가 같은 Key를 또 Update로 줌.
-			void InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id);
+			KeyIndex::Node* InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id);
 			// BackupTable 대신에 Skiplist 사용해서 바로 넣어준다.
-			void InsertBackupData(const char * internal_key, const unsigned int & bucket_id);
+			KeyIndex::Node* InsertBackupData(const char * internal_key, const unsigned int & bucket_id);
 
 
 			// Background Worker는 Queue를 보고 Indexlist를 asynchronous 하게 업데이트 한다.
@@ -410,7 +413,40 @@ namespace rocksdb {
 			}
 
 
-
+			void DoForegroundWork() {
+				IndexJob job;
+				while (yul_background_worker_todo_ops.load(std::memory_order_relaxed) != 
+					yul_background_worker_written_ops.load(std::memory_order_relaxed)) {
+					if (GetJob(job)) {
+						auto snap_count = yul_snapshot_count.load(std::memory_order_relaxed);
+						{
+							std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+							if (snap_count >= 1) {
+								// Snapshot 켜졌으면 Append 방식으로 작동
+								if (job.Type == kIndexJobBucket) {
+									InsertIndexData(job.IndexKey(), job.BucketId());
+								}
+								else if (job.Type == kIndexJobBackup) {
+									InsertBackupData(job.IndexKey(), job.BucketId());
+								}
+								else if (job.Type == kIndexJobUpdate) {
+									InsertIndexDataUpdate(job.IndexKey(), job.BucketId());
+								}
+							}
+							else if (snap_count == 0) {
+								// Snapshot 꺼지면 Overwrite모드로 작동
+								if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
+									InsertIndexDataOverwrite(job.IndexKey(), job.BucketId());
+								}
+								else if (job.Type == kIndexJobUpdate) {
+									InsertIndexDataUpdate(job.IndexKey(), job.BucketId());
+								}
+							}
+						}
+						yul_background_worker_written_ops.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+			}
 
 			// Returns the pointer to the internal iterator to the buckets where buckets
 			// are sorted according to the user specified KeyComparator.  Note that
@@ -420,23 +456,29 @@ namespace rocksdb {
 				auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) -
 					yul_background_worker_written_ops.load(std::memory_order_relaxed);
 
-				// 만약 Queue 에 반영돼야 할 데이터 남아있으면 깨운다.
+				// 만약 Queue 에 반영돼야 할 데이터 남아있으면 그냥 여기서 처리
 				if (queuesize != 0 && yul_background_worker_done) {
-					yul_background_worker_done = false;
-					yul_background_worker_cv.notify_all();
-					std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-					yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+					DoForegroundWork();
+				//	yul_background_worker_done = false;
+				//	yul_background_worker_cv.notify_all();
+				//	//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+				//	yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+				}
+				else if (queuesize != 0 && !yul_background_worker_done) {
+					// 만약 Backgroundworker가 처리중이였다면 Wait
+						std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+						yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				}
 
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);
 
 				if (arena == nullptr) {
-					return new Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_));
+					return new Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_), this);
 				}
 				else {
 					auto mem = arena->AllocateAligned(sizeof(Iterator));
-					return new (mem) Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_));
+					return new (mem) Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_), this);
 				}
 
 
@@ -458,7 +500,9 @@ namespace rocksdb {
 			auto iter = GetIterator(nullptr);
 			iter->Seek(Slice(), k.memtable_key().data());
 			if (iter->Valid()) {
-				return iter->key();
+				auto key = iter->key();
+				delete iter;
+				return key;
 			}
 			return nullptr;
 		}
@@ -486,17 +530,17 @@ namespace rocksdb {
 						if (yul_snapshot_count == 0 || compare_(bucket, mem_key) >= 0) {
 							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
 							callback_func(callback_args, bucket);
-							printf("Found From Cuckoo : ");
-							PrintKey(bucket);
+							//printf("Found From Cuckoo : ");
+							//PrintKey(bucket);
 							return;
 						}
 						else if (yul_snapshot_count > 0) {
 							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
 							bucket = GetFromIndexTable(key);
 							if (bucket != nullptr) {
-								printf("Found From Skiplist : ");
 								callback_func(callback_args, bucket);
-								PrintKey(bucket);
+								//printf("Found From Skiplist : ");
+								//PrintKey(bucket);
 								return;
 							}
 							break;
@@ -521,8 +565,8 @@ namespace rocksdb {
 			//if (bucket != nullptr) {
 			//  callback_func(callback_args, bucket);
 			//}
-			printf("Found Failed : ");
-			PrintKey(key.memtable_key().data());
+			//printf("Found Failed : ");
+			//PrintKey(key.memtable_key().data());
 #endif
 		}
 
@@ -558,8 +602,6 @@ namespace rocksdb {
 
 		CUCKOOCOLLISIONMOD:
 			auto* key = static_cast<char*>(handle);
-			printf("Insert Concurrent : ");
-			PrintKey(key);
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
@@ -576,7 +618,7 @@ namespace rocksdb {
 				return;
 			}
 			int bucket_ids[HashCuckooRepFactory::kMaxHashCount];
-
+			yul_background_worker_written_ops.load(std::memory_order_relaxed);
 			if (QuickInsertConcurrently(key, user_key, bucket_ids, initial_hash_id) == false) {
 				// Hash 에 바로 넣기 실패했으면 Cuckoo Path 해줘야함.
 				int local_cuckoo_path_[kCuckooPathMaxSearchSteps] = { 0, };
@@ -644,8 +686,6 @@ namespace rocksdb {
 		void HashCuckooRep::Insert(KeyHandle handle) {
 			static const float kMaxFullness = 0.90f;
 			auto* key = static_cast<char*>(handle);
-			printf("Insert : ");
-			PrintKey(key);
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
@@ -730,21 +770,21 @@ namespace rocksdb {
 			return false;
 		}
 
-		inline void HashCuckooRep::InsertIndexData(const char* internal_key, const unsigned int& bucket_id) {
-			KeyIndex_.InsertIndex(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexData(const char* internal_key, const unsigned int& bucket_id) {
+			return KeyIndex_.InsertIndex(internal_key, bucket_id);
 		}
 
-		inline void HashCuckooRep::InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id) {
-			KeyIndex_.InsertIndexOverwrite(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id) {
+			return KeyIndex_.InsertIndexOverwrite(internal_key, bucket_id);
 		}
 
 		// for cuckoo hash collision modify
-		inline void HashCuckooRep::InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id) {
-			KeyIndex_.InsertIndexUpdate(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id) {
+			return KeyIndex_.InsertIndexUpdate(internal_key, bucket_id);
 		}
 
-		inline void HashCuckooRep::InsertBackupData(const char* internal_key, const unsigned int& bucket_id) {
-			KeyIndex_.InsertIndex(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertBackupData(const char* internal_key, const unsigned int& bucket_id) {
+			return KeyIndex_.InsertIndex(internal_key, bucket_id);
 		}
 
 		bool HashCuckooRep::QuickInsertConcurrently(const char* internal_key, const Slice& user_key,
@@ -1080,12 +1120,16 @@ namespace rocksdb {
 
 #ifndef YUIL
 		HashCuckooRep::Iterator::Iterator(
-			KeyIndex::Iterator* it,
-			const KeyComparator& compare, std::atomic<char*>* cuckoo_arr, const unsigned int& bucket_count_)
+			KeyIndex::Iterator* it, const KeyComparator& compare,
+			std::atomic<char*>* cuckoo_arr, const unsigned int& bucket_count_,
+			HashCuckooRep* list)
 			: cit_(it),
 			cuckoo_array_(cuckoo_arr),
 			bucket_count_(bucket_count_),
-			compare_(compare) {}
+			compare_(compare),
+			list_(list) {
+
+		}
 		// Returns true iff the iterator is positioned at a valid node.
 		bool HashCuckooRep::Iterator::Valid() const {
 			return cit_->Valid();
@@ -1127,9 +1171,24 @@ namespace rocksdb {
 		// Advance to the first entry with a key >= target
 		void HashCuckooRep::Iterator::Seek(const Slice& user_key,
 			const char* memtable_key) {
-			const char* encoded_key =
-				(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
-			cit_->Seek(encoded_key);
+			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
+				Slice ukey = Slice(user_key.data(), user_key.size() - 8);
+				auto HashId = list_->GetHash(ukey, hid);
+				const char* bucket =
+					cuckoo_array_[HashId].load(std::memory_order_acquire);
+				if (bucket != nullptr) {
+					Slice bucket_user_key = list_->UserKey(bucket);
+					if (ukey == bucket_user_key) {
+						const char* encoded_key =
+							(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
+						auto hint = list_->yul_index_array_[HashId];
+						cit_->Seek(encoded_key, hint);
+						return;
+					}
+				}
+			}
+			// 못찾으면 유효하지 않음
+			cit_->Invalidate();
 		}
 
 		// Retreat to the last entry with a key <= target
@@ -1270,28 +1329,35 @@ namespace rocksdb {
 			}
 			while (cuckoo->yul_work_queue_.size_approx() != 0) {
 				while (cuckoo->GetJob(job)) {
+					auto key = job.IndexKey();
+					auto bid = job.BucketId();
+					KeyIndex::Node* index = nullptr;
 					ops_complete++;
 					auto snap_count = cuckoo->yul_snapshot_count.load(std::memory_order_relaxed);
 					if (snap_count >= 1) {
 						// Snapshot 켜졌으면 Append 방식으로 작동
 						if (job.Type == kIndexJobBucket) {
-							cuckoo->InsertIndexData(job.IndexKey(), job.BucketId());
+							index = cuckoo->InsertIndexData(key, bid);
 						}
 						else if (job.Type == kIndexJobBackup) {
-							cuckoo->InsertBackupData(job.IndexKey(), job.BucketId());
+							index = cuckoo->InsertBackupData(key, bid);
 						}
 						else if (job.Type == kIndexJobUpdate) {
-							cuckoo->InsertIndexDataUpdate(job.IndexKey(), job.BucketId());
+							index = cuckoo->InsertIndexDataUpdate(key, bid);
 						}
 					}
 					else if (snap_count == 0) {
 						// Snapshot 꺼지면 Overwrite모드로 작동
 						if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-							cuckoo->InsertIndexDataOverwrite(job.IndexKey(), job.BucketId());
+							index = cuckoo->InsertIndexDataOverwrite(key, bid);
 						}
 						else if (job.Type == kIndexJobUpdate) {
-							cuckoo->InsertIndexDataUpdate(job.IndexKey(), job.BucketId());
+							index = cuckoo->InsertIndexDataUpdate(key, bid);
 						}
+					}
+					// Index array update
+					if (index != nullptr) {
+						cuckoo->yul_index_array_[bid] = index;
 					}
 				}
 			}
