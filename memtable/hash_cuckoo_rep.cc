@@ -1,4 +1,4 @@
-fndef YUIL
+#ifndef YUIL
 #ifndef ROCKSDB_LITE
 #include "memtable/hash_cuckoo_rep.h"
 #include "memtable/concurrentqueue.h"

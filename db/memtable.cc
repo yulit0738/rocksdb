@@ -993,8 +993,8 @@ void MemTableRep::Get(const LookupKey& k, void* callback_args,
        iter->Valid() && callback_func(callback_args, iter->key());
        iter->Next()) {
   }
-	  printf("Found From MemtableRep : ");
-	  PrintKey(iter->key());
+//	  printf("Found From MemtableRep : ");
+//	  PrintKey(iter->key());
 }
 
 void MemTable::RefLogContainingPrepSection(uint64_t log) {
