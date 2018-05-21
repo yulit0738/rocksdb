@@ -101,7 +101,7 @@ namespace rocksdb {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
 					yul_index_array_[bid] = nullptr;
 				}
-				
+
 				cuckoo_path_ = reinterpret_cast<int*>(
 					allocator_->Allocate(sizeof(int) * (cuckoo_path_max_depth_ + 1)));
 				is_nearly_full_ = false;
@@ -415,7 +415,7 @@ namespace rocksdb {
 
 			void DoForegroundWork() {
 				IndexJob job;
-				while (yul_background_worker_todo_ops.load(std::memory_order_relaxed) != 
+				while (yul_background_worker_todo_ops.load(std::memory_order_relaxed) !=
 					yul_background_worker_written_ops.load(std::memory_order_relaxed)) {
 					if (GetJob(job)) {
 						auto snap_count = yul_snapshot_count.load(std::memory_order_relaxed);
@@ -459,15 +459,15 @@ namespace rocksdb {
 				// 만약 Queue 에 반영돼야 할 데이터 남아있으면 그냥 여기서 처리
 				if (queuesize != 0 && yul_background_worker_done) {
 					DoForegroundWork();
-				//	yul_background_worker_done = false;
-				//	yul_background_worker_cv.notify_all();
-				//	//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-				//	yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+					//	yul_background_worker_done = false;
+					//	yul_background_worker_cv.notify_all();
+					//	//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+					//	yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				}
 				else if (queuesize != 0 && !yul_background_worker_done) {
 					// 만약 Backgroundworker가 처리중이였다면 Wait
-						std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-						yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+					std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+					yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				}
 
 				//KeyIndex::Iterator it(&KeyIndex_);
@@ -509,65 +509,37 @@ namespace rocksdb {
 
 		void HashCuckooRep::Get(const LookupKey& key, void* callback_args,
 			bool(*callback_func)(void* arg, const char* entry)) {
-#if 0
-			const char* bucket = GetFromIndexTable(key);
-			if (bucket != nullptr) {
-				printf("Found From Skiplist : ");
-				callback_func(callback_args, bucket);
-				PrintKey(bucket);
-			}
-#endif
-#if true
 			Slice user_key = key.user_key();
+			KeyIndex::Iterator cit_(&KeyIndex_);
 			for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
+				//Slice ukey = Slice(user_key.data(), user_key.size() - 8);
+				auto HashId = GetHash(user_key, hid);
 				const char* bucket =
-					cuckoo_array_[GetHash(user_key, hid)].load(std::memory_order_acquire);
+					cuckoo_array_[HashId].load(std::memory_order_acquire);
 				if (bucket != nullptr) {
 					Slice bucket_user_key = UserKey(bucket);
 					if (user_key == bucket_user_key) {
-						Slice mem_key = key.memtable_key(); // 이걸사용해야 Seq + meta까지 다 가져옴.
-															// For snapshot support we should compare seq_num with foundkey and inputkey
-						if (yul_snapshot_count == 0 || compare_(bucket, mem_key) >= 0) {
-							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
-							callback_func(callback_args, bucket);
-							//printf("Found From Cuckoo : ");
-							//PrintKey(bucket);
+						auto hint = yul_index_array_[HashId];
+						cit_.Seek(key.memtable_key().data(), hint);
+						if (cit_.Valid()) {
+							callback_func(callback_args, cit_.key());
 							return;
-						}
-						else if (yul_snapshot_count > 0) {
-							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
-							bucket = GetFromIndexTable(key);
-							if (bucket != nullptr) {
-								callback_func(callback_args, bucket);
-								//printf("Found From Skiplist : ");
-								//PrintKey(bucket);
-								return;
-							}
-							break;
 						}
 					}
 				}
 				else {
-					// as Put() always stores at the vacant bucket located by the
-					// hash function with the smallest possible id, when we first
-					// find a vacant bucket in Get(), that means a miss.
+					// nullptr 인 경우 아예 없는 Key인 경우라 그냥 break로 빠져나가면된다.
 					break;
 				}
 			}
 
+			// 혹시 모르니 Backuptable도 뒤져주긴 해야한다.
+			// Skiplist에는 Backuptable이 모두 존재하기는함.
+
 			MemTableRep* backup_table = backup_table_.get();
 			if (backup_table != nullptr) {
-				// 백업테이블은 애초에 Append 방식이라서 유지 잘되어있음.
-				// Get에서는 Cuckoo 해시에서만 분기시켜주자.
 				backup_table->Get(key, callback_args, callback_func);
 			}
-			//const char* bucket = GetFromBackupTable(user_key.data());
-			//if (bucket != nullptr) {
-			//  callback_func(callback_args, bucket);
-			//}
-			//printf("Found Failed : ");
-			//PrintKey(key.memtable_key().data());
-#endif
 		}
 
 
@@ -834,9 +806,12 @@ namespace rocksdb {
 					// 업데이트 될때까지 반복
 					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
 					(st_key, const_cast<char*>(internal_key)) != true);
-					if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
+					// QuickInsert와 마찬가지로 일단 Queue에 요청을 보내고
+					// Backgroundworker 에서 Overwrite를 할지 append 할지 결정한다.
+					/*if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-					}
+					}*/
+					InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 					// 하고나면 끝
 					return true;
 				}
@@ -897,13 +872,16 @@ namespace rocksdb {
 				cuckoo_array_[cuckoo_bucket_id].store(const_cast<char*>(internal_key),
 					std::memory_order_release);
 				//YUIL
-				if (is_key_update == false) {
+				// Quick Insert 에서는 Snapshot 유무와 Key 업데이트 상관없이 일단 Queue 에 다 보내준다.
+				// Backgroundworker 에서 Skiplist에 Overwrite 를 할지 Append 할지를 결정하도록함.
+				/*if (is_key_update == false) {
 					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				}
 				else if (is_key_update == true &&
 					yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-				}
+				}*/
+				InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				return true;
 			}
 
@@ -1187,7 +1165,18 @@ namespace rocksdb {
 					}
 				}
 			}
-			// 못찾으면 유효하지 않음
+			// Cuckoo 해시에 없으면 Backuptable도 뒤져야함. 없는 Key에 대한 검색이 올경우 어떻게 해야되지?
+			// Cuckoo 해시 밖이라서 Shortcut 접근은 불가능.
+			// 일단 별수 없다. Backuptable 이 있는지 검사하고 Skiplist를 전부 뒤지는 수밖에..
+			if (list_->backup_table_.get() != nullptr) {
+				const char* encoded_key =
+					(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
+				cit_->Seek(encoded_key);
+				return;
+			}
+			
+			// 이경우 까지 오면 Cuckoo 에는 존재하지않고 backup_table이 없을 경우에 그냥 없는키 이므로
+			// Invalidate 만 시켜준다.
 			cit_->Invalidate();
 		}
 
@@ -1355,7 +1344,7 @@ namespace rocksdb {
 							index = cuckoo->InsertIndexDataUpdate(key, bid);
 						}
 					}
-					// Index array update
+					// Index array update for shortcut pointer.
 					if (index != nullptr) {
 						cuckoo->yul_index_array_[bid] = index;
 					}
