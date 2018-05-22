@@ -58,9 +58,10 @@ class SkipList {
   Node* Insert(const Key& key);
   Node* InsertIndex(const Key& key, const unsigned int& cuckoo_hid);
   Node* InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
-  Node* InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid);
+  //Node* InsertIndexOverwriteWithHint(const Key& key, const unsigned int& cuckoo_hid, Node* hint);
+  Node* InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid, Node* hint);
   
-  /*void GetAllSkiplist() const {
+  void GetAllSkiplist() const {
 	  Node* x = head_;
 	  Node* next = x->Next(0);
 	  printf("====================================================================================\n");
@@ -70,7 +71,7 @@ class SkipList {
 		  if (next == NULL)break;
 	  }
 	  printf("====================================================================================\n");
-  }*/
+  }
   // Returns true iff an entry that compares equal to key is in the list.
   bool Contains(const Key& key) const;
 
@@ -690,9 +691,35 @@ SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsigned i
 	assert(prev_[0]->Next(0) == nullptr || !Equal(key, prev_[0]->Next(0)->key));
 
 	if (prev_ != nullptr && prev_[0]->key != nullptr && EqualUserKey(key, prev_[0]->key)) {
+		if (!LessThan(key, prev_[0]->key)) {
+			// 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면 
+			// 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
+			//printf("Key Update From "); PrintKey(prev_[0]->key);
+			//printf("Key Update To "); PrintKey(key);
+			prev_height_ = prev_[0]->height;
+			return nullptr;
+		}
 		// 만약 UserKey가 똑같으면 Hash id 와 Key 업데이트!!
+		//printf("Key Update From "); PrintKey(prev_[0]->key);
 		prev_[0]->key = key;
+		//printf("Key Update To "); PrintKey(key);
 		if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
+		prev_height_ = prev_[0]->height;
+		return nullptr;
+	}
+	else if (prev_ != nullptr && prev_[0]->Next(0) != nullptr && EqualUserKey(key, prev_[0]->Next(0)->key)) {
+		if (!LessThan(key, prev_[0]->Next(0)->key)) {
+			// 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면 
+			// 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
+			//printf("Cache Key Update From "); PrintKey(prev_[0]->Next(0)->key);
+			//printf("Cache Key Update To "); PrintKey(key);
+			prev_height_ = prev_[0]->height;
+			return nullptr;
+		}
+		//printf("Cache Key Update From "); PrintKey(prev_[0]->Next(0)->key);
+		prev_[0]->Next(0)->key = key;
+		//printf("Cache Key Update To "); PrintKey(key);
+		if (prev_[0]->Next(0)->hid != cuckoo_hid) prev_[0]->Next(0)->hid = cuckoo_hid;
 		prev_height_ = prev_[0]->height;
 		return nullptr;
 	}
@@ -728,13 +755,16 @@ SkipList<Key, Comparator>::InsertIndexOverwrite(const Key& key, const unsigned i
 
 template<typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node*
-SkipList<Key, Comparator>::InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid) {
+SkipList<Key, Comparator>::InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid, Node* hint) {
 	// Path modifying 일때 업데이트
 	// Hash Id만 찾아서 업데이트 해주면된다.
-	Node *x = FindGreaterOrEqual(key);
+	// Case Added!!!
+	// Hint를 이용해서 최신버전 Overwrite 할때도 검색 비용을 줄일때 사용한다.
+	Node *x = FindGreaterOrEqual(key, hint);
 
 	if (x != nullptr && EqualUserKey(key, x->key)) {
 		if (x->hid != cuckoo_hid) x->hid = cuckoo_hid;
+		x->key = key;
 	}
 	return nullptr;
 }

@@ -1567,11 +1567,26 @@ Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
     // Note: no need to consider the special case of
     // last_seq_same_as_publish_seq_==false since NewIterator is overridden in
     // WritePreparedTxnDB
-    auto snapshot = read_options.snapshot != nullptr
-                        ? read_options.snapshot->GetSequenceNumber()
-                        : versions_->LastSequence();
-    result = NewIteratorImpl(read_options, cfd, snapshot, read_callback);
-  }
+
+	//YUIL - write_group is working so we should wait for consistency
+	auto memtable = column_family_memtables_.get();
+	const char* memname = memtable->current()->GetLatestCFOptions().memtable_factory.get()->Name();
+	if (Slice(memname) == Slice("HashCuckooRepFactory")) {
+		Slice SignalToYULCuckoo_GetSnapshot("YUL_UNIQUE_GETSNAPSHOT");
+		NotifyGetSnapshot(SignalToYULCuckoo_GetSnapshot, Slice());
+		auto snapshot = read_options.snapshot != nullptr
+			? read_options.snapshot->GetSequenceNumber()
+			: versions_->LastSequence();
+		yul_snapshot_progressing_.store(false, std::memory_order_relaxed);
+		result = NewIteratorImpl(read_options, cfd, snapshot, read_callback);
+	}
+	else {
+		auto snapshot = read_options.snapshot != nullptr
+			? read_options.snapshot->GetSequenceNumber()
+			: versions_->LastSequence();
+		result = NewIteratorImpl(read_options, cfd, snapshot, read_callback);
+	}
+ }
   return result;
 }
 
@@ -1709,7 +1724,7 @@ const Snapshot* DBImpl::GetSnapshotForWriteConflictBoundary() {
 }
 #endif  // ROCKSDB_LITE
 
-SnapshotImpl* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
+ SnapshotImpl* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
   int64_t unix_time = 0;
   env_->GetCurrentTime(&unix_time);  // Ignore error
   SnapshotImpl* s = new SnapshotImpl;
@@ -1720,23 +1735,34 @@ SnapshotImpl* DBImpl::GetSnapshotImpl(bool is_write_conflict_boundary) {
     return nullptr;
   }
   //YUIL - write_group is working so we should wait for consistency
-  
-  Slice SignalToYULCuckoo_GetSnapshot("YUL_UNIQUE_GETSNAPSHOT");
-  //Put(WriteOptions(), SignalToYULCuckoo_GetSnapshot, Slice());
-  NotifyGetSnapshot(SignalToYULCuckoo_GetSnapshot, Slice());
-  InstrumentedMutexLock l(&mutex_);
-  auto snapshot_seq = last_seq_same_as_publish_seq_
-                          ? versions_->LastSequence()
-                          : versions_->LastPublishedSequence();
-  yul_snapshot_progressing_.store(false, std::memory_order_relaxed);
-  return snapshots_.New(s, snapshot_seq, unix_time, is_write_conflict_boundary);
+  auto memtable = column_family_memtables_.get();
+  const char* memname = memtable->current()->GetLatestCFOptions().memtable_factory.get()->Name();
+  if (Slice(memname) == Slice("HashCuckooRepFactory")) {
+	  Slice SignalToYULCuckoo_GetSnapshot("YUL_UNIQUE_GETSNAPSHOT");
+	  //Put(WriteOptions(), SignalToYULCuckoo_GetSnapshot, Slice());
+	  NotifyGetSnapshot(SignalToYULCuckoo_GetSnapshot, Slice());
+	  InstrumentedMutexLock l(&mutex_);
+	  auto snapshot_seq = last_seq_same_as_publish_seq_
+		  ? versions_->LastSequence()
+		  : versions_->LastPublishedSequence();
+	  yul_snapshot_progressing_.store(false, std::memory_order_relaxed);
+	  return snapshots_.New(s, snapshot_seq, unix_time, is_write_conflict_boundary);
+  }
+  else {
+	  InstrumentedMutexLock l(&mutex_);
+	  auto snapshot_seq = last_seq_same_as_publish_seq_
+		  ? versions_->LastSequence()
+		  : versions_->LastPublishedSequence();
+	  return snapshots_.New(s, snapshot_seq, unix_time, is_write_conflict_boundary);
+  }
+
 }
 
 void DBImpl::ReleaseSnapshot(const Snapshot* s) {
   const SnapshotImpl* casted_s = reinterpret_cast<const SnapshotImpl*>(s);
   {
     InstrumentedMutexLock l(&mutex_);
-    printf("Release a Snapshot : Sequence Number is %zu\n", casted_s->GetSequenceNumber());
+	casted_s->GetSequenceNumber();
     snapshots_.Delete(casted_s);
     uint64_t oldest_snapshot;
     if (snapshots_.empty()) {
@@ -1757,9 +1783,14 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
       }
     }
   }
-  //YUIL - write_group is working so we should wait for consistency
-  Slice SignalToYULCuckoo_ReleaseSnapshot("YUL_UNIQUE_RELSNAPSHOT");
-  NotifyReleaseSnapshot(SignalToYULCuckoo_ReleaseSnapshot, Slice());
+  auto memtable = column_family_memtables_.get();
+  const char* memname = memtable->current()->GetLatestCFOptions().memtable_factory.get()->Name();
+  if (Slice(memname) == Slice("HashCuckooRepFactory")) {
+	  //YUIL - write_group is working so we should wait for consistency
+	  Slice SignalToYULCuckoo_ReleaseSnapshot("YUL_UNIQUE_RELSNAPSHOT");
+	  NotifyReleaseSnapshot(SignalToYULCuckoo_ReleaseSnapshot, Slice());
+  }
+
   delete casted_s;
 }
 
