@@ -101,7 +101,7 @@ namespace rocksdb {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
 					yul_index_array_[bid] = nullptr;
 				}
-				
+
 				cuckoo_path_ = reinterpret_cast<int*>(
 					allocator_->Allocate(sizeof(int) * (cuckoo_path_max_depth_ + 1)));
 				is_nearly_full_ = false;
@@ -170,6 +170,9 @@ namespace rocksdb {
 				// The returned iterator is not valid.
 				// explicit Iterator(const MemTableRep* collection);
 				virtual ~Iterator() override {
+					if (list_->yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
+						list_->yul_snapshot_count.fetch_sub(1, std::memory_order_relaxed);
+					}
 					delete cit_;
 				};
 
@@ -415,7 +418,7 @@ namespace rocksdb {
 
 			void DoForegroundWork() {
 				IndexJob job;
-				while (yul_background_worker_todo_ops.load(std::memory_order_relaxed) != 
+				while (yul_background_worker_todo_ops.load(std::memory_order_relaxed) !=
 					yul_background_worker_written_ops.load(std::memory_order_relaxed)) {
 					if (GetJob(job)) {
 						auto snap_count = yul_snapshot_count.load(std::memory_order_relaxed);
@@ -447,6 +450,12 @@ namespace rocksdb {
 					}
 				}
 			}
+			static inline uint64_t GetSequenceNum(const char* internal_key) {
+				Slice akey = GetLengthPrefixedSlice(internal_key);
+				const uint64_t anum = DecodeFixed64(akey.data() + akey.size() - 8) >> 8;
+				return anum;
+				
+			}
 
 			// Returns the pointer to the internal iterator to the buckets where buckets
 			// are sorted according to the user specified KeyComparator.  Note that
@@ -455,21 +464,16 @@ namespace rocksdb {
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
 				auto queuesize = yul_background_worker_todo_ops.load(std::memory_order_relaxed) -
 					yul_background_worker_written_ops.load(std::memory_order_relaxed);
-
-				// 만약 Queue 에 반영돼야 할 데이터 남아있으면 그냥 여기서 처리
-				if (queuesize != 0 && yul_background_worker_done) {
-					DoForegroundWork();
-				//	yul_background_worker_done = false;
-				//	yul_background_worker_cv.notify_all();
-				//	//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-				//	yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+					yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
 				}
-				else if (queuesize != 0 && !yul_background_worker_done) {
+				if (queuesize != 0 && !yul_background_worker_done) {
 					// 만약 Backgroundworker가 처리중이였다면 Wait
-						std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-						yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+					yul_background_worker_done = false;
+					yul_background_worker_cv.notify_all();
+					//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+					//yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				}
-
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);
 
@@ -480,20 +484,6 @@ namespace rocksdb {
 					auto mem = arena->AllocateAligned(sizeof(Iterator));
 					return new (mem) Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_), this);
 				}
-
-
-				//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-				//yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
-				////KeyIndex::Iterator it(&KeyIndex_);
-				//auto it = new KeyIndex::Iterator(&KeyIndex_);
-
-				//if (arena == nullptr) {
-				//	return new Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_));
-				//}
-				//else {
-				//	auto mem = arena->AllocateAligned(sizeof(Iterator));
-				//	return new (mem) Iterator(it, compare_, cuckoo_array_, static_cast<unsigned int>(bucket_count_));
-				//}
 			}
 		};
 		const char* HashCuckooRep::GetFromIndexTable(const LookupKey& k) {
@@ -509,15 +499,6 @@ namespace rocksdb {
 
 		void HashCuckooRep::Get(const LookupKey& key, void* callback_args,
 			bool(*callback_func)(void* arg, const char* entry)) {
-#if 0
-			const char* bucket = GetFromIndexTable(key);
-			if (bucket != nullptr) {
-				printf("Found From Skiplist : ");
-				callback_func(callback_args, bucket);
-				PrintKey(bucket);
-			}
-#endif
-#if true
 			Slice user_key = key.user_key();
 			for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
 				const char* bucket =
@@ -525,22 +506,18 @@ namespace rocksdb {
 				if (bucket != nullptr) {
 					Slice bucket_user_key = UserKey(bucket);
 					if (user_key == bucket_user_key) {
-						Slice mem_key = key.memtable_key(); // 이걸사용해야 Seq + meta까지 다 가져옴.
+						Slice mem_key = key.internal_key(); // 이걸사용해야 Seq + meta까지 다 가져옴.
 															// For snapshot support we should compare seq_num with foundkey and inputkey
-						if (yul_snapshot_count == 0 || compare_(bucket, mem_key) >= 0) {
+						if (yul_snapshot_count.load(std::memory_order_acquire) == 0 || compare_(bucket, mem_key) >= 0) {
 							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
 							callback_func(callback_args, bucket);
-							//printf("Found From Cuckoo : ");
-							//PrintKey(bucket);
 							return;
 						}
-						else if (yul_snapshot_count > 0) {
+						else if (yul_snapshot_count.load(std::memory_order_acquire) > 0) {
 							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
 							bucket = GetFromIndexTable(key);
 							if (bucket != nullptr) {
 								callback_func(callback_args, bucket);
-								//printf("Found From Skiplist : ");
-								//PrintKey(bucket);
 								return;
 							}
 							break;
@@ -561,13 +538,6 @@ namespace rocksdb {
 				// Get에서는 Cuckoo 해시에서만 분기시켜주자.
 				backup_table->Get(key, callback_args, callback_func);
 			}
-			//const char* bucket = GetFromBackupTable(user_key.data());
-			//if (bucket != nullptr) {
-			//  callback_func(callback_args, bucket);
-			//}
-			//printf("Found Failed : ");
-			//PrintKey(key.memtable_key().data());
-#endif
 		}
 
 
@@ -834,9 +804,9 @@ namespace rocksdb {
 					// 업데이트 될때까지 반복
 					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
 					(st_key, const_cast<char*>(internal_key)) != true);
-					if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
+					//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-					}
+					//}
 					// 하고나면 끝
 					return true;
 				}
@@ -904,6 +874,7 @@ namespace rocksdb {
 					yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				}
+				//InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				return true;
 			}
 
@@ -1171,17 +1142,31 @@ namespace rocksdb {
 		// Advance to the first entry with a key >= target
 		void HashCuckooRep::Iterator::Seek(const Slice& user_key,
 			const char* memtable_key) {
+			const char* encoded_key =
+				(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
+			Slice ukey = list_->UserKey(encoded_key);
 			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
-				Slice ukey = Slice(user_key.data(), user_key.size() - 8);
 				auto HashId = list_->GetHash(ukey, hid);
 				const char* bucket =
 					cuckoo_array_[HashId].load(std::memory_order_acquire);
 				if (bucket != nullptr) {
 					Slice bucket_user_key = list_->UserKey(bucket);
 					if (ukey == bucket_user_key) {
-						const char* encoded_key =
-							(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
+
 						auto hint = list_->yul_index_array_[HashId];
+						cit_->Seek(encoded_key, hint);
+						if (cit_->Valid()) {
+							uint64_t skipseq = GetSequenceNum(cit_->key());
+							uint64_t cuckooseq = GetSequenceNum(bucket);
+							if (skipseq < cuckooseq) {
+								std::unique_lock<std::mutex> lock(list_->yul_background_worker_done_mutex);
+								list_->yul_background_worker_done_cv.wait(lock, [=] { return list_->yul_background_worker_done; });
+							}
+							else {
+								return;
+							}
+						}
+						hint = list_->yul_index_array_[HashId];
 						cit_->Seek(encoded_key, hint);
 						return;
 					}
