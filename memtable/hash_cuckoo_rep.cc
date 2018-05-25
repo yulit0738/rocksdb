@@ -1339,7 +1339,14 @@ namespace rocksdb {
 					}
 					// Index array update
 					if (index != nullptr) {
+						KeyIndex::Node* hint = cuckoo->yul_index_array_[bid];
+						if (hint != nullptr) {
+							uint64_t ikey = cuckoo->GetSequenceNum(key);
+							uint64_t hkey = cuckoo->GetSequenceNum(hint->key);
+							if (ikey > hkey) cuckoo->yul_index_array_[bid] = index;
+						} else {
 						cuckoo->yul_index_array_[bid] = index;
+						}
 					}
 				}
 			}
