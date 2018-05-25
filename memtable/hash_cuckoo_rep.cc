@@ -467,12 +467,12 @@ namespace rocksdb {
 				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
 					yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (queuesize != 0 && !yul_background_worker_done) {
+				if (queuesize != 0 && yul_background_worker_done) {
 					// 만약 Backgroundworker가 처리중이였다면 Wait
 					yul_background_worker_done = false;
 					yul_background_worker_cv.notify_all();
-					//std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-					//yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
+					std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+					yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done; });
 				}
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);

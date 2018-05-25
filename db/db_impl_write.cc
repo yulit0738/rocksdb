@@ -186,6 +186,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       versions_->SetLastSequence(last_sequence);
       MemTableInsertStatusCheck(w.status);
       write_thread_.ExitAsBatchGroupFollower(&w);
+	  yul_write_progressing_.store(false, std::memory_order_relaxed);
     }
     assert(w.state == WriteThread::STATE_COMPLETED);
     // STATE_COMPLETED conditional below handles exit
