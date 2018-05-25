@@ -697,33 +697,33 @@ namespace rocksdb {
 		assert(prev_[0]->Next(0) == nullptr || !Equal(key, prev_[0]->Next(0)->key));
 
 		if (prev_ != nullptr && prev_[0]->key != nullptr && EqualUserKey(key, prev_[0]->key)) {
-		         if (!LessThan(key, prev_[0]->key)) {
-		             // 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면
-		             // 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
+			if (!LessThan(key, prev_[0]->key)) {
+				// 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면
+				// 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
 
-		             prev_height_ = prev_[0]->height;
-		             return nullptr;
-		
+				prev_height_ = prev_[0]->height;
+				return nullptr;
+
 			}
-		         // 만약 UserKey가 똑같으면 Hash id 와 Key 업데이트!!
-		         prev_[0]->key = key;
-		         if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
-		         prev_height_ = prev_[0]->height;
-		         return nullptr;
-		
+			// 만약 UserKey가 똑같으면 Hash id 와 Key 업데이트!!
+			prev_[0]->key = key;
+			if (prev_[0]->hid != cuckoo_hid) prev_[0]->hid = cuckoo_hid;
+			prev_height_ = prev_[0]->height;
+			return nullptr;
+
 		}
 		else if (prev_ != nullptr && prev_[0]->Next(0) != nullptr && EqualUserKey(key, prev_[0]->Next(0)->key)) {
-		         if (!LessThan(key, prev_[0]->Next(0)->key)) {
-		             // 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면
-		             // 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
-		             prev_height_ = prev_[0]->height;
-		             return nullptr;
-		
-		}
-		         prev_[0]->Next(0)->key = key;
-		         if (prev_[0]->Next(0)->hid != cuckoo_hid) prev_[0]->Next(0)->hid = cuckoo_hid;
-		         prev_height_ = prev_[0]->height;
-		         return nullptr;
+			if (!LessThan(key, prev_[0]->Next(0)->key)) {
+				// 현재업데이트 하려고 하는 Key의 Sequence가 더 작다면
+				// 즉 Outdated 된 Data 라면 굳이 업데이트 안해줘도 된다.
+				prev_height_ = prev_[0]->height;
+				return nullptr;
+
+			}
+			prev_[0]->Next(0)->key = key;
+			if (prev_[0]->Next(0)->hid != cuckoo_hid) prev_[0]->Next(0)->hid = cuckoo_hid;
+			prev_height_ = prev_[0]->height;
+			return nullptr;
 		}
 
 		if (prev_ != nullptr && prev_[0]->key != nullptr && EqualUserKey(key, prev_[0]->key)) {
@@ -790,4 +790,5 @@ namespace rocksdb {
 	}
 
 }  // namespace rocksdb
+
 

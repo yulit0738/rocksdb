@@ -454,7 +454,7 @@ namespace rocksdb {
 				Slice akey = GetLengthPrefixedSlice(internal_key);
 				const uint64_t anum = DecodeFixed64(akey.data() + akey.size() - 8) >> 8;
 				return anum;
-				
+
 			}
 
 			// Returns the pointer to the internal iterator to the buckets where buckets
@@ -805,7 +805,7 @@ namespace rocksdb {
 					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
 					(st_key, const_cast<char*>(internal_key)) != true);
 					//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
-						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+					InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 					//}
 					// 하고나면 끝
 					return true;
@@ -1144,33 +1144,26 @@ namespace rocksdb {
 			const char* memtable_key) {
 			const char* encoded_key =
 				(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
-			Slice ukey = list_->UserKey(encoded_key);
 			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
+				Slice ukey = Slice(user_key.data(), user_key.size() - 8);
 				auto HashId = list_->GetHash(ukey, hid);
 				const char* bucket =
 					cuckoo_array_[HashId].load(std::memory_order_acquire);
 				if (bucket != nullptr) {
 					Slice bucket_user_key = list_->UserKey(bucket);
 					if (ukey == bucket_user_key) {
-
 						auto hint = list_->yul_index_array_[HashId];
-						cit_->Seek(encoded_key, hint);
-						if (cit_->Valid()) {
-							uint64_t skipseq = GetSequenceNum(cit_->key());
-							uint64_t cuckooseq = GetSequenceNum(bucket);
-							if (skipseq < cuckooseq) {
-								std::unique_lock<std::mutex> lock(list_->yul_background_worker_done_mutex);
-								list_->yul_background_worker_done_cv.wait(lock, [=] { return list_->yul_background_worker_done; });
-							}
-							else {
-								return;
-							}
-						}
-						hint = list_->yul_index_array_[HashId];
 						cit_->Seek(encoded_key, hint);
 						return;
 					}
 				}
+			}
+			// Cuckoo 해시에 없으면 Backuptable도 뒤져야함. 없는 Key에 대한 검색이 올경우 어떻게 해야되지?
+			// Cuckoo 해시 밖이라서 Shortcut 접근은 불가능.
+			// 일단 별수 없다. Backuptable 이 있는지 검사하고 Skiplist를 전부 뒤지는 수밖에..
+			if (list_->backup_table_.get() != nullptr) {
+				cit_->Seek(encoded_key);
+				return;
 			}
 			// 못찾으면 유효하지 않음
 			cit_->Invalidate();
@@ -1407,4 +1400,5 @@ namespace rocksdb {
 }  // namespace rocksdb
 #endif  // ROCKSDB_LITE
 #endif
+
 
