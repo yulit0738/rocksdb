@@ -874,6 +874,10 @@ namespace rocksdb {
 					yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				}
+				else {
+					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
+					if(hint != nullptr) hint->key = internal_key;
+				}
 				//InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 				return true;
 			}
