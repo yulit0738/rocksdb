@@ -60,7 +60,7 @@ namespace rocksdb {
 		Node* InsertIndexOverwrite(const Key& key, const unsigned int& cuckoo_hid);
 		Node* InsertIndexUpdate(const Key& key, const unsigned int& cuckoo_hid);
 
-		/*void GetAllSkiplist() const {
+		void GetAllSkiplist() const {
 		Node* x = head_;
 		Node* next = x->Next(0);
 		printf("====================================================================================\n");
@@ -70,7 +70,7 @@ namespace rocksdb {
 		if (next == NULL)break;
 		}
 		printf("====================================================================================\n");
-		}*/
+		}
 		// Returns true iff an entry that compares equal to key is in the list.
 		bool Contains(const Key& key) const;
 
@@ -326,6 +326,8 @@ namespace rocksdb {
 	template <typename Key, class Comparator>
 	inline void SkipList<Key, Comparator>::Iterator::SeekToFirst() {
 		node_ = list_->head_->Next(0);
+		//list_->GetAllSkiplist();
+		
 	}
 
 	template<typename Key, class Comparator>
@@ -769,7 +771,7 @@ namespace rocksdb {
 		// Path modifying 일때 업데이트
 		// Hash Id만 찾아서 업데이트 해주면된다.
 		Node *x = FindGreaterOrEqual(key);
-
+		assert(Equal(key, x->key));
 		if (x != nullptr && EqualUserKey(key, x->key)) {
 			if (x->hid != cuckoo_hid) x->hid = cuckoo_hid;
 		}
