@@ -41,7 +41,7 @@ quoted_perl_command = $(subst ','\'',$(perl_command))
 # `make install`
 
 # Set the default DEBUG_LEVEL to 1
-DEBUG_LEVEL?=1
+DEBUG_LEVEL?=0
 
 ifeq ($(MAKECMDGOALS),dbg)
 	DEBUG_LEVEL=2
@@ -115,7 +115,7 @@ ifeq ($(DEBUG_LEVEL),0)
 OPT += -DNDEBUG
 
 ifneq ($(USE_RTTI), 1)
-	CXXFLAGS += -fno-rtti
+	CXXFLAGS += 
 else
 	CXXFLAGS += -DROCKSDB_USE_RTTI
 endif
@@ -277,7 +277,7 @@ endif
 # This (the first rule) must depend on "all".
 default: all
 
-WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
+#WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
   -Wno-unused-parameter
 
 ifeq ($(PLATFORM), OS_OPENBSD)
