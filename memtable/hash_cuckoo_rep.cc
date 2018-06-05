@@ -1,3 +1,4 @@
+// This is Toss_Cinsp Version
 #ifndef YUIL
 #ifndef ROCKSDB_LITE
 #include "memtable/hash_cuckoo_rep.h"
@@ -21,7 +22,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include "memtable/persca_skiplist.h"
+#include "memtable/yul_inlineskiplist.h"
 #include "util/yul_util.h"
 
 
@@ -37,7 +38,7 @@ namespace rocksdb {
 		// Collision mark
 		static const unsigned int kIndexJobUpdate = 2;
 		static const unsigned int kQueueThreshhold = 20;
-		typedef SkipList<const char*, const MemTableRep::KeyComparator&> KeyIndex;
+		typedef YulInlineSkipList<const MemTableRep::KeyComparator&> KeyIndex;
 		struct CuckooStep {
 			static const int kNullStep = -1;
 			// the bucket id in the cuckoo array.
@@ -99,7 +100,7 @@ namespace rocksdb {
 				yul_index_array_ = new (indexmem) std::atomic<KeyIndex::Node*>[bucket_count_];
 				for (unsigned int bid = 0; bid < bucket_count_; ++bid) {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
-					yul_index_array_[bid].store(nullptr,std::memory_order_relaxed);
+					yul_index_array_[bid].store(nullptr, std::memory_order_relaxed);
 				}
 
 				cuckoo_path_ = reinterpret_cast<int*>(
@@ -119,6 +120,11 @@ namespace rocksdb {
 
 			// Returns true iff an entry that compares equal to key is in the collection.
 			virtual bool Contains(const char* internal_key) const override;
+
+			virtual KeyHandle Allocate(const size_t len, char** buf) override {
+				*buf = KeyIndex_.AllocateKey(len);
+				return static_cast<KeyHandle>(*buf);
+			}
 
 			virtual ~HashCuckooRep() override {
 				yul_background_worker_terminate.store(true, std::memory_order_seq_cst);
@@ -238,7 +244,7 @@ namespace rocksdb {
 			struct IndexJob {
 			public:
 				IndexJob(const char* key, const unsigned int& bucket, const int& type) :
-					indexkey(key), bucket_id(bucket), Type(type){}
+					indexkey(key), bucket_id(bucket), Type(type) {}
 				IndexJob() {}
 				~IndexJob() {}
 
@@ -386,13 +392,11 @@ namespace rocksdb {
 
 			// YUIL
 			// Index List(Persca Skiplist)에 Bucket Key와 Index 삽입
-			KeyIndex::Node* InsertIndexData(const char* internal_key, const unsigned int& bucket_id);
+			KeyIndex::Node* InsertIndexData(const char* internal_key);
 			// Index List 에 Key와 Index를 덮어쓴다. (Append 하지 않음)
-			KeyIndex::Node* InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id);
-			// Cuckoo 해쉬 Collision 해결할때.. Seq가 같은 Key를 또 Update로 줌.
-			KeyIndex::Node* InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id);
+			KeyIndex::Node* InsertIndexDataOverwrite(const char* internal_key);
 			// BackupTable 대신에 Skiplist 사용해서 바로 넣어준다.
-			KeyIndex::Node* InsertBackupData(const char * internal_key, const unsigned int & bucket_id);
+			KeyIndex::Node* InsertBackupData(const char * internal_key);
 
 
 			// Background Worker는 Queue를 보고 Indexlist를 asynchronous 하게 업데이트 한다.
@@ -426,63 +430,64 @@ namespace rocksdb {
 			};
 
 			void DoForegroundWork() {
-				auto queuesize = GetWorkQueueSize();
-				IndexJob jobs[100];
-				if (queuesize > 100) queuesize = 100;
-				auto jobsize = yul_work_queue_.try_dequeue_bulk(jobs, queuesize);
-
-				// Sorting jobs.
-				if (jobsize >= 1) {
-					std::sort(jobs, jobs+jobsize, IndexCompare(compare_));
-					std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-					for (size_t i = 0; i < jobsize; ++i) {
-						//printf("Fore : "); PrintKey(jobs[i].indexkey);
-						const IndexJob& job = jobs[i];
-						auto key = job.IndexKey();
-						unsigned int bid = job.BucketId();
-						KeyIndex::Node* index = nullptr;
-						auto snap_count = yul_snapshot_count.load(std::memory_order_relaxed);
-						if (snap_count >= 1) {
-							// Snapshot 켜졌으면 Append 방식으로 작동
-							if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-								index = InsertIndexData(key, bid);
-							}
-							else if (job.Type == kIndexJobUpdate) {
-								index = InsertIndexDataUpdate(key, bid);
-							}
-						}
-						else if (snap_count == 0) {
-							// Snapshot 꺼지면 Overwrite모드로 작동
-							if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-								index = InsertIndexDataOverwrite(key, bid);
-							}
-							else if (job.Type == kIndexJobUpdate) {
-								index = InsertIndexDataUpdate(key, bid);
-							}
-						}
-						// Index array update
-						if (index != nullptr) {
-							KeyIndex::Node* hint = yul_index_array_[bid];
-							if (hint != nullptr) {
-								uint64_t hkey = GetSequenceNum(hint->key);
-								uint64_t ikey = GetSequenceNum(key);
-								if (hkey < ikey) {
-									yul_index_array_[bid] = index;
+				HashCuckooRep::IndexJob job;
+					while (yul_work_queue_.size_approx() != 0) {
+						size_t ops_complete = 0;
+						while (GetJob(job)) {
+							auto key = job.IndexKey();
+							unsigned int bid = job.BucketId();
+							KeyIndex::Node* index = nullptr;
+							ops_complete++;
+							auto snap_count = yul_snapshot_count.load(std::memory_order_acquire);
+							if (snap_count >= 1) {
+								// Snapshot 켜졌으면 Append 방식으로 작동
+								if (job.Type == kIndexJobBucket || kIndexJobBackup) {
+									index = InsertIndexData(key);
 								}
 							}
-							else {
-								yul_index_array_[bid] = index;
+							else if (snap_count == 0) {
+								// Snapshot 꺼지면 Overwrite모드로 작동
+								if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
+									index = InsertIndexDataOverwrite(key);
+								}
 							}
-							//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-							//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+							// Index array update
+							if (index != nullptr) {
+								while (true) {
+									// Hint는 무조건 최신버전 이여야함
+									KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
+									if (hint != nullptr) {
+										uint64_t hkey = GetSequenceNum(hint->Key());
+										uint64_t ikey = GetSequenceNum(key);
+										if (hkey < ikey) {
+											if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+												break;
+											}
+											else {
+												continue;
+											}
+										}
+										else {
+											break;
+										}
+									}
+									else {
+										if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+											break;
+										}
+										else {
+											continue;
+										}
+									}
+								}
+								//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
+								//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+							}
 						}
+						yul_background_worker_written_ops.fetch_add(ops_complete, std::memory_order_relaxed);
 					}
-					yul_background_worker_written_ops.fetch_add(jobsize, std::memory_order_relaxed);
 				}
-				else {
-					return;
-				}
-			}
+			
 
 			static inline uint64_t GetSequenceNum(const char* internal_key) {
 				Slice akey = GetLengthPrefixedSlice(internal_key);
@@ -496,55 +501,56 @@ namespace rocksdb {
 			// any insert after this function call may affect the sorted nature of
 			// the returned iterator.
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
-				//if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-					// 매번 Add하게 하면 느려짐
-					//yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
-				//}
+				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+					//매번 Add하게 하면 느려짐
+					yul_snapshot_count.fetch_add(1, std::memory_order_relaxed);
+				}
 				auto todo = yul_background_worker_todo_ops.load(std::memory_order_relaxed);
 				auto ops = yul_background_worker_written_ops.load(std::memory_order_relaxed);
 				auto queuesize = todo - ops;
-				bool done = false;
+				//bool done = false;
 
-				if (queuesize != 0) {
-					if (yul_background_worker_done) {
-						yul_background_worker_cv.notify_all();
-						// Foreground 가 더느림..
-						//DoForegroundWork();
-						//done = true;
-					}
-					// 1. Busy loop using "pause" for 1 micro sec
-					// 2. Else SOMETIMES busy loop using "yield" for 100 micro sec (default)
-					// 3. Else blocking wait
+				//if (queuesize != 0) {
+				//	if (yul_background_worker_done) {
+				//		yul_background_worker_cv.notify_all();
+				//		// Foreground 가 더느림..
+				//		//DoForegroundWork();
+				//		//done = true;
+				//	}
+				//	// 1. Busy loop using "pause" for 1 micro sec
+				//	// 2. Else SOMETIMES busy loop using "yield" for 100 micro sec (default)
+				//	// 3. Else blocking wait
 
-					// On a modern Xeon each loop takes about 7 nanoseconds (most of which
-					// is the effect of the pause instruction), so 200 iterations is a bit
-					// more than a microsecond.  This is long enough that waits longer than
-					// this can amortize the cost of accessing the clock and yielding.
-					if (yul_background_worker_written_ops.load(std::memory_order_relaxed) < todo) {
-						yul_background_worker_cv.notify_all();
-						for (uint32_t tries = 0; tries < 200; ++tries) {
-							if (yul_background_worker_written_ops.load(std::memory_order_relaxed) >= todo) {
-								done = true;
-								break;
-							}
-							// More slower
-							//if (yul_background_worker_done) {
-							//	yul_background_worker_cv.notify_all();
-							//}
-							port::AsmVolatilePause();
-						}
-						if (!done) {
-							// 여기 까지 왔는데 혹시 background worker 가 자고있으면 한번 더깨운다.
-							if (yul_background_worker_done) {
-								yul_background_worker_cv.notify_all();
-							}
-							std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
-							yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done ||
-								(yul_background_worker_written_ops.load(std::memory_order_relaxed) >= todo); });
-						}
-					}
-				}
-					
+				//	// On a modern Xeon each loop takes about 7 nanoseconds (most of which
+				//	// is the effect of the pause instruction), so 200 iterations is a bit
+				//	// more than a microsecond.  This is long enough that waits longer than
+				//	// this can amortize the cost of accessing the clock and yielding.
+				//	if (yul_background_worker_written_ops.load(std::memory_order_relaxed) < todo) {
+				//		yul_background_worker_cv.notify_all();
+				//		for (uint32_t tries = 0; tries < 200; ++tries) {
+				//			if (yul_background_worker_written_ops.load(std::memory_order_relaxed) >= todo) {
+				//				done = true;
+				//				break;
+				//			}
+				//			// More slower
+				//			//if (yul_background_worker_done) {
+				//			//	yul_background_worker_cv.notify_all();
+				//			//}
+				//			port::AsmVolatilePause();
+				//		}
+				//		if (!done) {
+				//			// 여기 까지 왔는데 혹시 background worker 가 자고있으면 한번 더깨운다.
+				//			if (yul_background_worker_done) {
+				//				yul_background_worker_cv.notify_all();
+				//			}
+				//			std::unique_lock<std::mutex> lock(yul_background_worker_done_mutex);
+				//			yul_background_worker_done_cv.wait(lock, [=] { return yul_background_worker_done ||
+				//				(yul_background_worker_written_ops.load(std::memory_order_relaxed) >= todo); });
+				//		}
+				//	}
+				//}
+				if (queuesize != 0) DoForegroundWork();
+
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);
 
@@ -696,7 +702,7 @@ namespace rocksdb {
 					indexkey = cuckoo_array_[current_bid].load(std::memory_order_relaxed);
 					char* st_key = cuckoo_array_[kicked_out_bid].load(std::memory_order_relaxed);
 					if (st_key == nullptr && cuckoo_array_[kicked_out_bid].compare_exchange_weak(st_key, indexkey)) {
-						InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
+						//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
 						for (size_t i = 2; i < cuckoo_path_length; ++i) {
 							kicked_out_bid = local_cuckoo_path_[i - 1];
 							current_bid = local_cuckoo_path_[i];
@@ -706,7 +712,7 @@ namespace rocksdb {
 								.store(indexkey, std::memory_order_release);
 							// 쫒겨난 키들에 대해 Index update
 							//InsertIndexData(indexkey, kicked_out_bid);
-							InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
+							//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
 							yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid], std::memory_order_release);
 						}
 						int insert_key_bid = local_cuckoo_path_[cuckoo_path_length - 1];
@@ -795,7 +801,7 @@ namespace rocksdb {
 				cuckoo_array_[kicked_out_bid]
 					.store(indexkey, std::memory_order_release);
 				//InsertIndexData(indexkey, kicked_out_bid);
-				InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
+				//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
 				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid], std::memory_order_release);
 			}
 			int insert_key_bid = cuckoo_path_[cuckoo_path_length - 1];
@@ -818,22 +824,17 @@ namespace rocksdb {
 			return false;
 		}
 
-		inline KeyIndex::Node* HashCuckooRep::InsertIndexData(const char* internal_key, const unsigned int& bucket_id) {
-			return KeyIndex_.InsertIndex(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexData(const char* internal_key) {
+			return KeyIndex_.InsertConcurrently(internal_key);
 		}
 
-		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataOverwrite(const char* internal_key, const unsigned int& bucket_id) {
-			return KeyIndex_.InsertIndexOverwrite(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataOverwrite(const char* internal_key) {
+			return KeyIndex_.InsertConcurrently(internal_key);
 			//return KeyIndex_.InsertIndex(internal_key, bucket_id);
 		}
 
-		// for cuckoo hash collision modify
-		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataUpdate(const char* internal_key, const unsigned int& bucket_id) {
-			return KeyIndex_.InsertIndexUpdate(internal_key, bucket_id);
-		}
-
-		inline KeyIndex::Node* HashCuckooRep::InsertBackupData(const char* internal_key, const unsigned int& bucket_id) {
-			return KeyIndex_.InsertIndex(internal_key, bucket_id);
+		inline KeyIndex::Node* HashCuckooRep::InsertBackupData(const char* internal_key) {
+			return KeyIndex_.InsertConcurrently(internal_key);
 		}
 
 		bool HashCuckooRep::QuickInsertConcurrently(const char* internal_key, const Slice& user_key,
@@ -885,10 +886,12 @@ namespace rocksdb {
 					(st_key, const_cast<char*>(internal_key)) != true);
 					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
 					if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-						uint64_t hkey = GetSequenceNum(hint->key);
+						uint64_t hkey = GetSequenceNum(hint->Key());
 						uint64_t ikey = GetSequenceNum(internal_key);
 						if (ikey > hkey) {
-							hint->key = internal_key;
+							//hint->key = internal_key;
+							//hint->UpdateKey(internal_key);
+							InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 						}
 						return true;
 					}
@@ -965,10 +968,12 @@ namespace rocksdb {
 				//}
 				KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
 				if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-					uint64_t hkey = GetSequenceNum(hint->key);
+					uint64_t hkey = GetSequenceNum(hint->Key());
 					uint64_t ikey = GetSequenceNum(internal_key);
 					if (ikey > hkey) {
-						hint->key = internal_key;
+						//hint->key = internal_key;
+						//hint->UpdateKey(internal_key);
+						InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 					}
 					return true;
 				}
@@ -1459,37 +1464,44 @@ namespace rocksdb {
 					auto snap_count = cuckoo->yul_snapshot_count.load(std::memory_order_relaxed);
 					if (snap_count >= 1) {
 						// Snapshot 켜졌으면 Append 방식으로 작동
-						if (job.Type == kIndexJobBucket) {
-							index = cuckoo->InsertIndexData(key, bid);
-						}
-						else if (job.Type == kIndexJobBackup) {
-							index = cuckoo->InsertBackupData(key, bid);
-						}
-						else if (job.Type == kIndexJobUpdate) {
-							index = cuckoo->InsertIndexDataUpdate(key, bid);
+						if (job.Type == kIndexJobBucket || kIndexJobBackup) {
+							index = cuckoo->InsertIndexData(key);
 						}
 					}
 					else if (snap_count == 0) {
 						// Snapshot 꺼지면 Overwrite모드로 작동
 						if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-							index = cuckoo->InsertIndexDataOverwrite(key, bid);
-						}
-						else if (job.Type == kIndexJobUpdate) {
-							index = cuckoo->InsertIndexDataUpdate(key, bid);
+							index = cuckoo->InsertIndexDataOverwrite(key);
 						}
 					}
 					// Index array update
 					if (index != nullptr) {
-						KeyIndex::Node* hint = cuckoo->yul_index_array_[bid];
-						if (hint != nullptr) {
-							uint64_t hkey = cuckoo->GetSequenceNum(hint->key);
-							uint64_t ikey = cuckoo->GetSequenceNum(key);
-							if (hkey < ikey) {
-								cuckoo->yul_index_array_[bid] = index;
+						while (true) {
+							// Hint는 무조건 최신버전 이여야함
+							KeyIndex::Node* hint = cuckoo->yul_index_array_[bid].load(std::memory_order_acquire);
+							if (hint != nullptr) {
+								uint64_t hkey = cuckoo->GetSequenceNum(hint->Key());
+								uint64_t ikey = cuckoo->GetSequenceNum(key);
+								if (hkey < ikey) {
+									if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+										break;
+									}
+									else {
+										continue;
+									}
+								}
+								else {
+									break;
+								}
 							}
-						}
-						else {
-							cuckoo->yul_index_array_[bid] = index;
+							else {
+								if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+									break;
+								}
+								else {
+									continue;
+								}
+							}
 						}
 						//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
 						//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
