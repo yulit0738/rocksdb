@@ -1,4 +1,4 @@
-// This is Toss_Cinsp Version
+// This is Toss_Cinsp_ConcurrentSkip_Backpointer Version
 #ifndef YUIL
 #ifndef ROCKSDB_LITE
 #include "memtable/hash_cuckoo_rep.h"
@@ -89,18 +89,26 @@ namespace rocksdb {
 				// YUIL
 				KeyIndex_(compare, allocator),
 				yul_index_array_(nullptr),
+				yul_index_skip_array_(nullptr),
 				//yul_work_queue_ptok_(yul_work_queue_),
 				//yul_work_queue_ctok_(yul_work_queue_),
 				yul_background_worker_done(true) {
 				char* mem = reinterpret_cast<char*>(
 					allocator_->Allocate(sizeof(std::atomic<const char*>) * bucket_count_));
 				cuckoo_array_ = new (mem) std::atomic<char*>[bucket_count_];
+				/* Shortcut pointer init */
 				char* indexmem = reinterpret_cast<char*>(
 					allocator_->Allocate(sizeof(const char*) * bucket_count_));
 				yul_index_array_ = new (indexmem) std::atomic<KeyIndex::Node*>[bucket_count_];
+				/* skip pointer init */
+				char* skipmem = reinterpret_cast<char*>(
+					allocator_->Allocate(sizeof(const char*) * bucket_count_));
+				yul_index_skip_array_ = new (skipmem) std::atomic<KeyIndex::Node*>[bucket_count_];
+
 				for (unsigned int bid = 0; bid < bucket_count_; ++bid) {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
 					yul_index_array_[bid].store(nullptr, std::memory_order_relaxed);
+					yul_index_skip_array_[bid].store(nullptr, std::memory_order_relaxed);
 				}
 
 				cuckoo_path_ = reinterpret_cast<int*>(
@@ -298,7 +306,7 @@ namespace rocksdb {
 			// YUIL
 			// for making index these workers have to do their jobs in work_queue
 			// How many workers will be created
-			static const unsigned int kDefaultMaxBackgroundWorker = 1;
+			static const unsigned int kDefaultMaxBackgroundWorker = 4;
 
 			// YUIL
 			// queue includes all cuckoo indicies.
@@ -309,8 +317,8 @@ namespace rocksdb {
 
 			// YUIL
 			// all jobs in queue will be done by background thread
-			//std::vector<std::thread*> yul_background_worker;
-			std::thread* yul_background_worker;
+			std::vector<std::thread*> yul_background_worker;
+			//std::thread* yul_background_worker;
 			std::atomic<bool> yul_background_worker_terminate;
 
 			// YUIL
@@ -345,6 +353,7 @@ namespace rocksdb {
 			// YUIL
 			KeyIndex KeyIndex_;
 			std::atomic<KeyIndex::Node*>* yul_index_array_;
+			std::atomic<KeyIndex::Node*>* yul_index_skip_array_;
 
 			// returns the bucket id assogied to the input slice based on the
 			unsigned int GetHash(const Slice& slice, const int hash_func_id) const {
@@ -408,8 +417,8 @@ namespace rocksdb {
 			const char* GetFromIndexTable(const LookupKey& key);
 
 			inline bool GetJob(IndexJob& job) {
-				//return yul_work_queue_.try_dequeue(job);
-				return yul_work_queue_.try_dequeue_non_interleaved(job);
+				return yul_work_queue_.try_dequeue(job);
+				//return yul_work_queue_.try_dequeue_non_interleaved(job);
 			}
 
 			inline bool GetForegroundJob(IndexJob& job) {
@@ -429,10 +438,22 @@ namespace rocksdb {
 				}
 			};
 
-			void DoForegroundWork() {
+			void UpdateSkipPointer(KeyIndex::Node* p, const IndexJob& job) {
+				KeyIndex::Node* skipp = yul_index_skip_array_[job.bucket_id].load(std::memory_order_relaxed);
+				if (skipp == nullptr) {
+					/* Skippointer 가 null이면 update */
+					/* Skippointer를 갖고있음으로써 duplicate 가 많을때 memory compare 및 memory 연산을 줄일 수 있음.*/
+					/* 동시에 skippointer에 대한 update가 일어나는 상황이라면? */
+					/* compare 는 한번 더 일어날수 있지만 correctness 에는 지장 없음 */
+					yul_index_skip_array_[job.bucket_id].store(p, std::memory_order_relaxed);
+				}
+			}
+
+			void DoForegroundWork(const size_t& thresh) {
 				HashCuckooRep::IndexJob job;
+				bool done = false;
 					while (yul_work_queue_.size_approx() != 0) {
-						size_t ops_complete = 0;
+							size_t ops_complete = 0;
 						while (GetJob(job)) {
 							auto key = job.IndexKey();
 							unsigned int bid = job.BucketId();
@@ -473,6 +494,7 @@ namespace rocksdb {
 									}
 									else {
 										if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+											UpdateSkipPointer(index, job);
 											break;
 										}
 										else {
@@ -483,8 +505,15 @@ namespace rocksdb {
 								//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
 								//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
 							}
+							if (ops_complete == thresh) {
+								done = true;
+								break;
+							}
 						}
 						yul_background_worker_written_ops.fetch_add(ops_complete, std::memory_order_relaxed);
+						if (done) {
+							break;
+						}
 					}
 				}
 			
@@ -549,7 +578,13 @@ namespace rocksdb {
 				//		}
 				//	}
 				//}
-				if (queuesize != 0) DoForegroundWork();
+				if (queuesize != 0) {
+					if (yul_background_worker_done) {
+						yul_background_worker_cv.notify_all();
+					}
+					DoForegroundWork(queuesize);
+
+				}
 
 				//KeyIndex::Iterator it(&KeyIndex_);
 				auto it = new KeyIndex::Iterator(&KeyIndex_);
@@ -698,7 +733,7 @@ namespace rocksdb {
 					// 마지막 Path 만 Compare And Swap 해보고 안되면 Path 다시 찾게 하면됨
 					int kicked_out_bid = local_cuckoo_path_[0];
 					int current_bid = local_cuckoo_path_[1];
-					yul_index_array_[0].store(yul_index_array_[1], std::memory_order_release);
+					yul_index_array_[current_bid].store(yul_index_array_[kicked_out_bid], std::memory_order_release);
 					indexkey = cuckoo_array_[current_bid].load(std::memory_order_relaxed);
 					char* st_key = cuckoo_array_[kicked_out_bid].load(std::memory_order_relaxed);
 					if (st_key == nullptr && cuckoo_array_[kicked_out_bid].compare_exchange_weak(st_key, indexkey)) {
@@ -713,7 +748,8 @@ namespace rocksdb {
 							// 쫒겨난 키들에 대해 Index update
 							//InsertIndexData(indexkey, kicked_out_bid);
 							//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
-							yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid], std::memory_order_release);
+							yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
+							yul_index_skip_array_[kicked_out_bid].store(yul_index_skip_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
 						}
 						int insert_key_bid = local_cuckoo_path_[cuckoo_path_length - 1];
 						cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
@@ -802,7 +838,9 @@ namespace rocksdb {
 					.store(indexkey, std::memory_order_release);
 				//InsertIndexData(indexkey, kicked_out_bid);
 				//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
-				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid], std::memory_order_release);
+				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
+				yul_index_skip_array_[kicked_out_bid].store(yul_index_skip_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
+
 			}
 			int insert_key_bid = cuckoo_path_[cuckoo_path_length - 1];
 			cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
@@ -884,23 +922,25 @@ namespace rocksdb {
 					// 업데이트 될때까지 반복
 					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
 					(st_key, const_cast<char*>(internal_key)) != true);
-					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-					if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-						uint64_t hkey = GetSequenceNum(hint->Key());
-						uint64_t ikey = GetSequenceNum(internal_key);
-						if (ikey > hkey) {
-							//hint->key = internal_key;
-							//hint->UpdateKey(internal_key);
-							InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+					while (true) {
+						KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
+						if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+							uint64_t hkey = GetSequenceNum(hint->Key());
+							uint64_t ikey = GetSequenceNum(internal_key);
+							if (ikey > hkey) {
+								//hint->key = internal_key;
+								//hint->UpdateKey(internal_key);
+								InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+							}
+							return true;
 						}
+
+						//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
+						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+						//}
+						// 하고나면 끝
 						return true;
 					}
-
-					//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
-					InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-					//}
-					// 하고나면 끝
-					return true;
 				}
 				else {
 					// 새로 삽입되는 경우
@@ -958,27 +998,22 @@ namespace rocksdb {
 			if (cuckoo_bucket_id != -1) {
 				cuckoo_array_[cuckoo_bucket_id].store(const_cast<char*>(internal_key),
 					std::memory_order_release);
-				//YUIL
-				//if (is_key_update == false) {
-				//	InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-				//}
-				//else if (is_key_update == true &&
-				//	yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
-				//	InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-				//}
-				KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-				if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-					uint64_t hkey = GetSequenceNum(hint->Key());
-					uint64_t ikey = GetSequenceNum(internal_key);
-					if (ikey > hkey) {
-						//hint->key = internal_key;
-						//hint->UpdateKey(internal_key);
-						InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+
+				while (true) {
+					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
+					if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+						uint64_t hkey = GetSequenceNum(hint->Key());
+						uint64_t ikey = GetSequenceNum(internal_key);
+						if (ikey > hkey) {
+							//hint->key = internal_key;
+							//if (!hint->UpdateKeyConcurrent(internal_key)) continue;
+							InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+						}
+						return true;
 					}
+					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
 					return true;
 				}
-				InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-				return true;
 			}
 
 			return false;
@@ -1227,12 +1262,23 @@ namespace rocksdb {
 		// REQUIRES: Valid()
 		void HashCuckooRep::Iterator::Next() {
 			assert(Valid());
+			Slice obj = GetLengthPrefixedSlice(cit_->key());
+			Slice ukey = Slice(obj.data(), obj.size() - 8);
+			KeyIndex::Node* sp = nullptr;
+			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
+				auto HashId = list_->GetHash(ukey, hid);
+				const char* bucket =
+					cuckoo_array_[HashId].load(std::memory_order_acquire);
+				if (bucket != nullptr) {
+					Slice bucket_user_key = list_->UserKey(bucket);
+					if (ukey == bucket_user_key) {
+						sp = list_->yul_index_skip_array_[HashId].load(std::memory_order_acquire);
+						break;
+					}
+				}
+			}
+			if (sp != nullptr) cit_->SetNode(sp);
 			cit_->Next();
-			//if (cit_->Valid()) {
-			//  const char* key = cuckoo_array_[atoi(cit_->value())].load(std::memory_order_relaxed);
-			//  tmpkey_ = key;
-			//  std::cout << tmpkey_ << std::endl;
-			//}
 		}
 
 		// Advances to the previous position.
@@ -1496,6 +1542,7 @@ namespace rocksdb {
 							}
 							else {
 								if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+									cuckoo->UpdateSkipPointer(index, job);
 									break;
 								}
 								else {
@@ -1638,10 +1685,10 @@ namespace rocksdb {
 			static_cast<size_t>(
 			(average_data_size_ + pointer_size) / kFullness)
 		);
-		//for (int i = 0; i < c->kDefaultMaxBackgroundWorker; ++i) {
-		c->yul_background_worker = new std::thread(BackgroundWorker, c);
+		for (int i = 0; i < c->kDefaultMaxBackgroundWorker; ++i) {
+		c->yul_background_worker.push_back(new std::thread(BackgroundWorker, c));
 		//new std::thread(BackgroundWorkerCaller, c);
-		//}
+		}
 
 		return c;
 	}

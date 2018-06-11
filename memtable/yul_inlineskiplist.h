@@ -172,6 +172,8 @@ namespace rocksdb {
 			// Advance to the first entry with a key >= target
 			void Seek(const char* target, Node* hint);
 
+			void SetNode(Node* p);
+
 			// Invalidate This Iterator
 			void Invalidate();
 
@@ -319,7 +321,7 @@ namespace rocksdb {
 		void UpdateKey(const char* key) {
 			int height = UnstashHeight();
 			const char* bkey = Key();
-			printf("before key(Height : %d) : ",height); PrintKey(bkey);
+			printf("before key(Height : %d) : ", height); PrintKey(bkey);
 			printf("target key : "); PrintKey(key);
 			//Node* x = reinterpret_cast<Node*>(const_cast<char*>(key));
 			memcpy(&next_[1], key, sizeof(const char*));
@@ -423,6 +425,11 @@ namespace rocksdb {
 	template<class Comparator>
 	inline void YulInlineSkipList<Comparator>::Iterator::Seek(const char* target, Node* hint) {
 		node_ = list_->FindGreaterOrEqual(target, hint);
+	}
+
+	template<class Comparator>
+	inline void YulInlineSkipList<Comparator>::Iterator::SetNode(Node* p) {
+		node_ = p;
 	}
 
 	template<class Comparator>
@@ -732,13 +739,13 @@ namespace rocksdb {
 
 	template <class Comparator>
 	typename YulInlineSkipList<Comparator>::Node*
-	YulInlineSkipList<Comparator>::Insert(const char* key) {
+		YulInlineSkipList<Comparator>::Insert(const char* key) {
 		return Insert<false>(key, seq_splice_, false);
 	}
 
 	template <class Comparator>
 	typename YulInlineSkipList<Comparator>::Node*
-	YulInlineSkipList<Comparator>::InsertConcurrently(const char* key) {
+		YulInlineSkipList<Comparator>::InsertConcurrently(const char* key) {
 		Node* prev[kMaxPossibleHeight];
 		Node* next[kMaxPossibleHeight];
 		Splice splice;
@@ -749,7 +756,7 @@ namespace rocksdb {
 
 	template <class Comparator>
 	typename YulInlineSkipList<Comparator>::Node*
-	YulInlineSkipList<Comparator>::InsertWithHint(const char* key, void** hint) {
+		YulInlineSkipList<Comparator>::InsertWithHint(const char* key, void** hint) {
 		assert(hint != nullptr);
 		Splice* splice = reinterpret_cast<Splice*>(*hint);
 		if (splice == nullptr) {
@@ -803,8 +810,8 @@ namespace rocksdb {
 	template <class Comparator>
 	template <bool UseCAS>
 	typename YulInlineSkipList<Comparator>::Node*
-	YulInlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
-		bool allow_partial_splice_fix) {
+		YulInlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
+			bool allow_partial_splice_fix) {
 		Node* x = reinterpret_cast<Node*>(const_cast<char*>(key)) - 1;
 		int height = x->UnstashHeight();
 		assert(height >= 1 && height <= kMaxHeight_);
