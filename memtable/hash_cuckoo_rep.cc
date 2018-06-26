@@ -1291,6 +1291,7 @@ namespace rocksdb {
 		// REQUIRES: Valid()
 		void HashCuckooRep::Iterator::Next() {
 			assert(Valid());
+#if 0
 			if (list_->have_arena || !list_->is_there_dupliacated_key) {
 				cit_->Next();
 			}
@@ -1315,6 +1316,28 @@ namespace rocksdb {
 				}
 				cit_->Next();
 			}
+#endif
+			if (list_->is_there_dupliacated_key) {
+				Slice obj = GetLengthPrefixedSlice(cit_->key());
+				Slice ukey = Slice(obj.data(), obj.size() - 8);
+				KeyIndex::Node* sp = nullptr;
+				for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
+					auto HashId = list_->GetHash(ukey, hid);
+					const char* bucket =
+						cuckoo_array_[HashId].load(std::memory_order_acquire);
+					if (bucket != nullptr) {
+						Slice bucket_user_key = list_->UserKey(bucket);
+						if (ukey == bucket_user_key) {
+							sp = list_->yul_index_skip_array_[HashId].load(std::memory_order_acquire);
+							break;
+						}
+					}
+				}
+				if (sp != nullptr) {
+					cit_->SetNode(sp);
+				}
+			}
+			cit_->Next();
 		}
 
 		// Advances to the previous position.
