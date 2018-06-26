@@ -177,6 +177,7 @@ namespace rocksdb {
 				std::atomic<char*>* cuckoo_array_;
 				unsigned int bucket_count_;
 				std::string tmp_;  // For passing to EncodeKey
+				bool dup_ratio_exceed_;
 				HashCuckooRep* list_;
 #endif
 
@@ -962,6 +963,7 @@ namespace rocksdb {
 
 				if (is_key_update) {
 					// 중복키 업데이트 인경우에..
+					dup_count_++;
 					stored_key = cuckoo_array_[cuckoo_bucket_id].load(std::memory_order_relaxed);
 					char* st_key = const_cast<char*>(stored_key);
 
@@ -1331,7 +1333,7 @@ namespace rocksdb {
 #endif
 			//printf("dup : %zd | ocup : %zd | %f\n", list_->dup_count_, list_->occupied_count_.load(std::memory_order_relaxed),
 			//	static_cast<double>(list_->dup_count_ / list_->occupied_count_.load(std::memory_order_relaxed)));
-			if (list_->occupied_count_.load(std::memory_order_relaxed)/ list_->dup_count_ >= 2) {
+			if (list_->is_there_dupliacated_key) {
 				Slice obj = GetLengthPrefixedSlice(cit_->key());
 				Slice ukey = Slice(obj.data(), obj.size() - 8);
 				KeyIndex::Node* sp = nullptr;
@@ -1347,18 +1349,10 @@ namespace rocksdb {
 						}
 					}
 				}
-				if (sp != nullptr && sp->NoBarrier_Next(0) !=nullptr) {
-					Slice tmp = GetLengthPrefixedSlice(sp->Key());
-					Slice utmp = Slice(tmp.data(), tmp.size() - 8);
-					Slice tmp2 = GetLengthPrefixedSlice(sp->NoBarrier_Next(0)->Key());
-					Slice utmp2 = Slice(tmp2.data(), tmp2.size() - 8);
-					if (utmp != utmp2) {
-						cit_->SetNode(sp);
-					}
+				if (sp != nullptr && cit_->isNodeEqual(sp)) {
+					cit_->SetNode(sp);
 				}
-
 			}
-
 			cit_->Next();
 		}
 
