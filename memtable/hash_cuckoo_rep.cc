@@ -89,6 +89,7 @@ namespace rocksdb {
 				// YUIL
 				KeyIndex_(compare, allocator),
 				is_there_dupliacated_key(false),
+				dup_count_(0),
 				have_arena(false),
 				yul_index_array_(nullptr),
 				yul_index_skip_array_(nullptr),
@@ -350,6 +351,7 @@ namespace rocksdb {
 			bool yul_background_worker_done;
 			bool is_there_dupliacated_key;
 			bool have_arena;
+			size_t dup_count_;
 
 			// YUIL
 			// need to support Snapshot so we prepare some tricky flag for snapshot :)
@@ -506,7 +508,7 @@ namespace rocksdb {
 						//	}
 						//}
 						// Index array update
-						if (index != nullptr) {
+						if (job.Type == kIndexJobBucket && index != nullptr) {
 							UpdateSkipPointer(index, job);
 							while (true) {
 								// Hint는 무조건 최신버전 이여야함
@@ -537,6 +539,10 @@ namespace rocksdb {
 							}
 							//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
 							//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+						}
+						else if (job.Type == kIndexJobBackup) {
+							yul_index_array_[bid].store(index, std::memory_order_release);
+							yul_index_skip_array_[bid].store(index, std::memory_order_release);
 						}
 						if (yul_background_worker_written_ops.load(std::memory_order_relaxed) + ops_complete >= thresh) {
 							done = true;
@@ -789,7 +795,7 @@ namespace rocksdb {
 						cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
 						cuckoo_path_building_mutex_.unlock();
 						//InsertIndexData(indexkey, insert_key_bid);
-						InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobBucket));
+						InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobBackup));
 					} // Swap 실패하면
 					else {
 						cuckoo_path_building_mutex_.unlock();
@@ -872,14 +878,19 @@ namespace rocksdb {
 					.store(indexkey, std::memory_order_release);
 				//InsertIndexData(indexkey, kicked_out_bid);
 				//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
+				//printf("current bid : %d | kickedout bid : %d | Before Index key : ",current_bid,kicked_out_bid); PrintKey(yul_index_array_[current_bid].load(std::memory_order_relaxed)->Key());
 				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
+				//printf("current bid : %d | kickedout bid : %d | After Index key : ", current_bid, kicked_out_bid); PrintKey(yul_index_array_[kicked_out_bid].load(std::memory_order_relaxed)->Key());
+				//printf("current bid : %d | kickedout bid : %d | Before Skip key : ", current_bid, kicked_out_bid); PrintKey(yul_index_skip_array_[current_bid].load(std::memory_order_relaxed)->Key());
 				yul_index_skip_array_[kicked_out_bid].store(yul_index_skip_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
-
+				//printf("current bid : %d | kickedout bid : %d | After Skip key : ", current_bid, kicked_out_bid); PrintKey(yul_index_skip_array_[kicked_out_bid].load(std::memory_order_relaxed)->Key());
 			}
 			int insert_key_bid = cuckoo_path_[cuckoo_path_length - 1];
+			//printf("insert key bid : %d | Before Insert Key : ", insert_key_bid); PrintKey(cuckoo_array_[insert_key_bid].load());
 			cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
+			//printf("insert key bid : %d | Before Insert Key : ", insert_key_bid); PrintKey(cuckoo_array_[insert_key_bid].load());
 			//InsertIndexData(indexkey, insert_key_bid);
-			InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobBucket));
+			InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobBackup));
 		}
 
 		bool HashCuckooRep::Contains(const char* internal_key) const {
@@ -1025,6 +1036,7 @@ namespace rocksdb {
 					if (bucket_user_key.compare(user_key) == 0) {
 						is_key_update = true;
 						is_there_dupliacated_key = true;
+						dup_count_++;
 						cuckoo_bucket_id = bucket_ids[hid];
 						break;
 					}
@@ -1317,7 +1329,9 @@ namespace rocksdb {
 				cit_->Next();
 			}
 #endif
-			if (list_->is_there_dupliacated_key) {
+			//printf("dup : %zd | ocup : %zd | %f\n", list_->dup_count_, list_->occupied_count_.load(std::memory_order_relaxed),
+			//	static_cast<double>(list_->dup_count_ / list_->occupied_count_.load(std::memory_order_relaxed)));
+			if (list_->occupied_count_.load(std::memory_order_relaxed)/ list_->dup_count_ >= 2) {
 				Slice obj = GetLengthPrefixedSlice(cit_->key());
 				Slice ukey = Slice(obj.data(), obj.size() - 8);
 				KeyIndex::Node* sp = nullptr;
@@ -1333,10 +1347,18 @@ namespace rocksdb {
 						}
 					}
 				}
-				if (sp != nullptr) {
-					cit_->SetNode(sp);
+				if (sp != nullptr && sp->NoBarrier_Next(0) !=nullptr) {
+					Slice tmp = GetLengthPrefixedSlice(sp->Key());
+					Slice utmp = Slice(tmp.data(), tmp.size() - 8);
+					Slice tmp2 = GetLengthPrefixedSlice(sp->NoBarrier_Next(0)->Key());
+					Slice utmp2 = Slice(tmp2.data(), tmp2.size() - 8);
+					if (utmp != utmp2) {
+						cit_->SetNode(sp);
+					}
 				}
+
 			}
+
 			cit_->Next();
 		}
 
@@ -1591,7 +1613,7 @@ namespace rocksdb {
 					//	}
 					//}
 					// Index array update
-					if (index != nullptr) {
+					if (job.Type == kIndexJobBucket && index != nullptr) {
 						cuckoo->UpdateSkipPointer(index, job);
 						while (true) {
 							// Hint는 무조건 최신버전 이여야함
@@ -1622,6 +1644,11 @@ namespace rocksdb {
 						}
 						//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
 						//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+					}
+					else if (job.Type == kIndexJobBackup) {
+						// collision modifying
+						cuckoo->yul_index_array_[bid].store(index, std::memory_order_release);
+						cuckoo->yul_index_skip_array_[bid].store(index, std::memory_order_release);
 					}
 				}
 			}
@@ -1720,13 +1747,15 @@ namespace rocksdb {
 
 	inline void PrintKey(const char* ikey)
 	{
-		Slice key = GetLengthPrefixedSlice(ikey);
-		Slice kkey = Slice(key.data(), key.size() - 8);
-		const uint64_t anum = DecodeFixed64(key.data() + key.size() - 8) >> 8;
-		std::string tmp;
-		tmp.assign(kkey.data(), kkey.size());
-		//unsigned int val = next->value;
-		printf("KEY : %16s | SEQ : %zu | VALUE : %s\n", tmp.c_str(), anum, tmp.c_str());
+		if (ikey != nullptr) {
+			Slice key = GetLengthPrefixedSlice(ikey);
+			Slice kkey = Slice(key.data(), key.size() - 8);
+			const uint64_t anum = DecodeFixed64(key.data() + key.size() - 8) >> 8;
+			std::string tmp;
+			tmp.assign(kkey.data(), kkey.size());
+			//unsigned int val = next->value;
+			printf("KEY : %16s | SEQ : %zu | VALUE : %s\n", tmp.c_str(), anum, tmp.c_str());
+		}
 	}
 
 	MemTableRep* HashCuckooRepFactory::CreateMemTableRep(
