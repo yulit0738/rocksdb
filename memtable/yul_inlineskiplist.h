@@ -318,17 +318,6 @@ namespace rocksdb {
 
 		const char* Key() const { return reinterpret_cast<const char*>(&next_[1]); }
 
-		void UpdateKey(const char* key) {
-			int height = UnstashHeight();
-			const char* bkey = Key();
-			printf("before key(Height : %d) : ", height); PrintKey(bkey);
-			printf("target key : "); PrintKey(key);
-			//Node* x = reinterpret_cast<Node*>(const_cast<char*>(key));
-			memcpy(&next_[1], key, sizeof(const char*));
-			const char* kkey = Key();
-			printf("after key : "); PrintKey(kkey);
-		}
-
 		// Accessors/mutators for links.  Wrapped in methods so we can add
 		// the appropriate barriers as necessary, and perform the necessary
 		// addressing trickery for storing links below the Node in memory.
@@ -1067,4 +1056,5 @@ namespace rocksdb {
 		}
 	}
 
-}  // namespace rocksdb  
+}  // namespace rocksdb
+  // namespace rocksdb    // namespace rocksdb  
