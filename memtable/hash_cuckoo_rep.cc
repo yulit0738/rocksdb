@@ -88,22 +88,15 @@ namespace rocksdb {
 				yul_snapshot_count(0),
 				// YUIL
 				KeyIndex_(compare, allocator),
-				yul_index_array_(nullptr),
 				//yul_work_queue_ptok_(yul_work_queue_),
 				//yul_work_queue_ctok_(yul_work_queue_),
 				yul_background_worker_done(true) {
 				char* mem = reinterpret_cast<char*>(
 					allocator_->Allocate(sizeof(std::atomic<const char*>) * bucket_count_));
 				cuckoo_array_ = new (mem) std::atomic<char*>[bucket_count_];
-				/* Shortcut pointer init */
-				char* indexmem = reinterpret_cast<char*>(
-					yul_arena_.Allocate(sizeof(const char*) * bucket_count_));
-				yul_index_array_ = new (indexmem) std::atomic<KeyIndex::Node*>[bucket_count_];
-				/* skip pointer init */
 				
 				for (unsigned int bid = 0; bid < bucket_count_; ++bid) {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
-					yul_index_array_[bid].store(nullptr, std::memory_order_relaxed);
 				}
 
 				cuckoo_path_ = reinterpret_cast<int*>(
@@ -360,7 +353,6 @@ namespace rocksdb {
 
 			// YUIL
 			KeyIndex KeyIndex_;
-			std::atomic<KeyIndex::Node*>* yul_index_array_;
 			
 			// returns the bucket id assogied to the input slice based on the
 			unsigned int GetHash(const Slice& slice, const int hash_func_id) const {
@@ -453,60 +445,12 @@ namespace rocksdb {
 					size_t ops_complete = 0;
 					while (GetJob(job)) {
 						auto key = job.IndexKey();
-						unsigned int bid = job.BucketId();
 						KeyIndex::Node* index = nullptr;
 						ops_complete++;
 						if (job.Type == kIndexJobBucket || kIndexJobBackup) {
 							index = InsertIndexData(key);
 						}
-						//auto snap_count = yul_snapshot_count.load(std::memory_order_acquire);
-						//if (snap_count >= 1) {
-						//	// Snapshot 켜졌으면 Append 방식으로 작동
-						//	if (job.Type == kIndexJobBucket || kIndexJobBackup) {
-						//		index = InsertIndexData(key);
-						//	}
-						//}
-						//else if (snap_count == 0) {
-						//	// Snapshot 꺼지면 Overwrite모드로 작동
-						//	if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-						//		index = InsertIndexDataOverwrite(key);
-						//	}
-						//}
-						// Index array update
-						if (job.Type == kIndexJobBucket && index != nullptr) {
-							while (true) {
-								// Hint는 무조건 최신버전 이여야함
-								KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
-								if (hint != nullptr) {
-									uint64_t hkey = GetSequenceNum(hint->Key());
-									uint64_t ikey = GetSequenceNum(key);
-									if (hkey < ikey) {
-										if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-											break;
-										}
-										else {
-											continue;
-										}
-									}
-									else {
-										break;
-									}
-								}
-								else {
-									if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-										break;
-									}
-									else {
-										continue;
-									}
-								}
-							}
-							//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-							//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
-						}
-						else if (job.Type == kIndexJobBackup) {
-							yul_index_array_[bid].store(index, std::memory_order_release);
-						}
+
 						if (yul_background_worker_written_ops.load(std::memory_order_relaxed) + ops_complete >= thresh) {
 							done = true;
 							break;
@@ -736,7 +680,6 @@ namespace rocksdb {
 					// 마지막 Path 만 Compare And Swap 해보고 안되면 Path 다시 찾게 하면됨
 					int kicked_out_bid = local_cuckoo_path_[0];
 					int current_bid = local_cuckoo_path_[1];
-					yul_index_array_[current_bid].store(yul_index_array_[kicked_out_bid], std::memory_order_release);
 					indexkey = cuckoo_array_[current_bid].load(std::memory_order_relaxed);
 					char* st_key = cuckoo_array_[kicked_out_bid].load(std::memory_order_relaxed);
 					if (st_key == nullptr && cuckoo_array_[kicked_out_bid].compare_exchange_weak(st_key, indexkey)) {
@@ -751,7 +694,6 @@ namespace rocksdb {
 							// 쫒겨난 키들에 대해 Index update
 							//InsertIndexData(indexkey, kicked_out_bid);
 							//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
-							yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
 						}
 						int insert_key_bid = local_cuckoo_path_[cuckoo_path_length - 1];
 						cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
@@ -838,7 +780,6 @@ namespace rocksdb {
 				indexkey = cuckoo_array_[current_bid].load(std::memory_order_relaxed);
 				cuckoo_array_[kicked_out_bid]
 					.store(indexkey, std::memory_order_release);
-				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
 			}
 			int insert_key_bid = cuckoo_path_[cuckoo_path_length - 1];
 			//printf("insert key bid : %d | Before Insert Key : ", insert_key_bid); PrintKey(cuckoo_array_[insert_key_bid].load());
@@ -924,26 +865,11 @@ namespace rocksdb {
 					// 업데이트 될때까지 반복
 					while (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak
 					(st_key, const_cast<char*>(internal_key)) != true);
-					while (true) {
-						KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-						if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-							uint64_t hkey = GetSequenceNum(hint->Key());
-							uint64_t ikey = GetSequenceNum(internal_key);
-							if (ikey > hkey) {
-								//hint->key = internal_key;
-								//hint->UpdateKey(internal_key);
-								InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-							}
-							return true;
-						}
 
-						//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
-						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-						//}
-						// 하고나면 끝
+					InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+
 						return true;
 					}
-				}
 				else {
 					// 새로 삽입되는 경우
 					// nullptr 이여야만함.
@@ -1001,23 +927,10 @@ namespace rocksdb {
 
 			if (cuckoo_bucket_id != -1) {
 				cuckoo_array_[cuckoo_bucket_id].store(const_cast<char*>(internal_key),
-					std::memory_order_release);
+				std::memory_order_release);
 
-				while (true) {
-					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-					if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-						uint64_t hkey = GetSequenceNum(hint->Key());
-						uint64_t ikey = GetSequenceNum(internal_key);
-						if (ikey > hkey) {
-							//hint->key = internal_key;
-							//if (!hint->UpdateKeyConcurrent(internal_key)) continue;
-							InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-						}
-						return true;
-					}
-					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-					return true;
-				}
+				InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+				return true;
 			}
 
 			return false;
@@ -1272,78 +1185,9 @@ namespace rocksdb {
 		// Advance to the first entry with a key >= target
 		void HashCuckooRep::Iterator::Seek(const Slice& user_key,
 			const char* memtable_key) {
-			//const char* encoded_key =
-			//      (memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
-			//cit_->Seek(encoded_key);
-			Slice ukey;
-			static int count = 0;
 			const char* encoded_key =
-				(memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
-			if (user_key.empty()) {
-				if (memtable_key == nullptr) {
-					cit_->Invalidate();
-				}
-				else {
-					Slice obj = GetLengthPrefixedSlice(memtable_key);
-					ukey = Slice(obj.data(), obj.size() - 8);
-				}
-			}
-			else {
-				ukey = Slice(user_key.data(), user_key.size() - 8);
-			}
-			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
-				auto HashId = list_->GetHash(ukey, hid);
-				const char* bucket =
-					cuckoo_array_[HashId].load(std::memory_order_acquire);
-				if (bucket != nullptr) {
-					Slice bucket_user_key = list_->UserKey(bucket);
-					if (ukey == bucket_user_key) {
-						auto hint = list_->yul_index_array_[HashId].load(std::memory_order_acquire);
-						if (hint != nullptr) {
-							cit_->Seek(encoded_key, hint);
-
-						}
-						else {
-							//printf("Hint Can not seek : %d / TODO : %zd / WRITEEN : %zd / bucket_count : %zd\n", ++count, list_->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
-							//      list_->yul_background_worker_written_ops.load(std::memory_order_relaxed), list_->bucket_count_);
-							//printf("Target KEY : "); PrintKey(encoded_key);
-							//printf("Bucket : "); PrintKey(bucket);
-							//if (hint != nullptr) { printf("Hint Found : "); PrintKey(hint->key); }
-							//else { printf("Hint Not Found!!\n"); }
-							//cit_->Seek(encoded_key);
-							//if (cit_->Valid()) {
-							//      printf("Seek found : "); PrintKey(cit_->key());
-							//}
-							//else { printf("Seek Not Found!!\n"); }
-							//
-							//printf("\n");
-							cit_->Invalidate();
-						}
-						//printf("[BACKEND SEEK]n");
-						//printf("Target KEY : "); PrintKey(encoded_key);
-						//printf("Bucket : "); PrintKey(bucket);
-						//if (hint != nullptr) { printf("Hint Found : "); PrintKey(hint->key); }
-						//else { printf("Hint Not Found!!\n"); }
-						//if (cit_->Valid()) {
-						//      printf("Seek found : "); PrintKey(cit_->key());
-						//}
-						//else { printf("Seek Not Found!!\n"); }
-						//
-						//printf("\n");
-						return;
-					}
-				}
-			}
-			// Cuckoo 해시에 없으면 Backuptable도 뒤져야함. 없는 Key에 대한 검색이 올경우 어떻게 해야되지?
-			// Cuckoo 해시 밖이라서 Shortcut 접근은 불가능.
-			// 일단 별수 없다. Backuptable 이 있는지 검사하고 Skiplist를 전부 뒤지는 수밖에..
-			if (list_->backup_table_.get() != nullptr) {
-				cit_->Seek(encoded_key);
-				return;
-			}
-			// 못찾으면 유효하지 않음
-			//printf("Can not seek : %d\n", ++count);
-			cit_->Invalidate();
+			      (memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
+			cit_->Seek(encoded_key);
 		}
 
 		// Retreat to the last entry with a key <= target
@@ -1493,153 +1337,15 @@ namespace rocksdb {
 			while (cuckoo->yul_work_queue_.size_approx() != 0) {
 				while (cuckoo->GetJob(job)) {
 					auto key = job.IndexKey();
-					unsigned int bid = job.BucketId();
 					KeyIndex::Node* index = nullptr;
 					ops_complete++;
 					if (job.Type == kIndexJobBucket || kIndexJobBackup) {
 						index = cuckoo->InsertIndexData(key);
 					}
-					//auto snap_count = cuckoo->yul_snapshot_count.load(std::memory_order_relaxed);
-					//if (snap_count >= 1) {
-					//	// Snapshot 켜졌으면 Append 방식으로 작동
-					//	if (job.Type == kIndexJobBucket || kIndexJobBackup) {
-					//		index = cuckoo->InsertIndexData(key);
-					//	}
-					//}
-					//else if (snap_count == 0) {
-					//	// Snapshot 꺼지면 Overwrite모드로 작동
-					//	if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-					//		index = cuckoo->InsertIndexDataOverwrite(key);
-					//	}
-					//}
-					// Index array update
-					if (job.Type == kIndexJobBucket && index != nullptr) {
-						while (true) {
-							// Hint는 무조건 최신버전 이여야함
-							KeyIndex::Node* hint = cuckoo->yul_index_array_[bid].load(std::memory_order_acquire);
-							if (hint != nullptr) {
-								uint64_t hkey = cuckoo->GetSequenceNum(hint->Key());
-								uint64_t ikey = cuckoo->GetSequenceNum(key);
-								if (hkey < ikey) {
-									if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-										break;
-									}
-									else {
-										continue;
-									}
-								}
-								else {
-									break;
-								}
-							}
-							else {
-								if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-									break;
-								}
-								else {
-									continue;
-								}
-							}
-						}
-						//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-						//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
-					}
-					else if (job.Type == kIndexJobBackup) {
-						// collision modifying
-						cuckoo->yul_index_array_[bid].store(index, std::memory_order_release);
-					}
 				}
 			}
 
 			cuckoo->yul_background_worker_written_ops.fetch_add(ops_complete, std::memory_order_relaxed);
-		}
-	}
-
-	//void BackgroundWorker(HashCuckooRep* cuckoo)
-	//{
-	//      std::unique_lock<std::mutex> lock(cuckoo->yul_background_worker_mutex);
-	//      while (true) {
-	//              auto queuesize = cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed)
-	//                      - cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed);
-	//              if (cuckoo->yul_background_worker_terminate) {
-	//                      cuckoo->yul_background_worker_done = true;
-	//                      //cuckoo->yul_background_worker_done_cv.notify_all();
-	//                      break;
-	//              }
-
-	//              if (queuesize == 0) {
-	//                      /*printf("TODO OPS : %zu WRITTEN OPS : %zu \n",
-	//                      cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
-	//                      cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed));*/
-	//                      cuckoo->yul_background_worker_done = true;
-	//                      cuckoo->yul_background_worker_done_cv.notify_all();
-	//                      cuckoo->yul_background_worker_cv.wait(lock);
-	//                      cuckoo->yul_background_worker_done = false;
-	//              }
-
-	//              //size_t queuesize = cuckoo->GetWorkQueueSize();
-	//              HashCuckooRep::IndexJob jobs[100];
-	//              if (queuesize > 100) queuesize = 100;
-	//              size_t jobsize = cuckoo->yul_work_queue_.try_dequeue_bulk(jobs, queuesize);
-
-	//              // Sorting jobs.
-	//              if (jobsize >= 1) {
-	//                      for (size_t i = 0; i < jobsize; ++i) {
-	//                              //printf("Fore : "); PrintKey(jobs[i].indexkey);
-	//                              const HashCuckooRep::IndexJob& job = jobs[i];
-	//                              auto key = job.IndexKey();
-	//                              unsigned int bid = job.BucketId();
-	//                              KeyIndex::Node* index = nullptr;
-	//                              auto snap_count = cuckoo->yul_snapshot_count.load(std::memory_order_relaxed);
-	//                              if (snap_count >= 1) {
-	//                                      // Snapshot 켜졌으면 Append 방식으로 작동
-	//                                      if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-	//                                              index = cuckoo->InsertIndexData(key, bid);
-	//                                      }
-	//                                      else if (job.Type == kIndexJobUpdate) {
-	//                                              index = cuckoo->InsertIndexDataUpdate(key, bid);
-	//                                      }
-	//                              }
-	//                              else if (snap_count == 0) {
-	//                                      // Snapshot 꺼지면 Overwrite모드로 작동
-	//                                      if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-	//                                              index = cuckoo->InsertIndexDataOverwrite(key, bid);
-	//                                      }
-	//                                      else if (job.Type == kIndexJobUpdate) {
-	//                                              index = cuckoo->InsertIndexDataUpdate(key, bid);
-	//                                      }
-	//                              }
-	//                              // Index array update
-	//                              if (index != nullptr) {
-	//                                      KeyIndex::Node* hint = cuckoo->yul_index_array_[bid];
-	//                                      if (hint != nullptr) {
-	//                                              uint64_t hkey = HashCuckooRep::GetSequenceNum(hint->key);
-	//                                              uint64_t ikey = HashCuckooRep::GetSequenceNum(key);
-	//                                              if (hkey < ikey) {
-	//                                                      cuckoo->yul_index_array_[bid] = index;
-	//                                              }
-	//                                      }
-	//                                      else {
-	//                                              cuckoo->yul_index_array_[bid] = index;
-	//                                      }
-	//                                      //printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-	//                                      //cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
-	//                              }
-	//                      }
-	//                      cuckoo->yul_background_worker_written_ops.fetch_add(jobsize, std::memory_order_relaxed);
-	//              }
-	//      }
-	//}
-
-	void BackgroundWorkerCaller(HashCuckooRep* cuckoo)
-	{
-		while (true) {
-			// 2 초마다 깨워준다.
-			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			if (cuckoo->yul_background_worker_done) {
-				cuckoo->yul_background_worker_done_cv.notify_all();
-				cuckoo->yul_background_worker_cv.notify_all();
-			}
 		}
 	}
 
