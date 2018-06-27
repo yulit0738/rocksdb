@@ -49,6 +49,7 @@
 #include "port/port.h"
 #include "util/allocator.h"
 #include "util/random.h"
+#include <mutex>
 
 namespace rocksdb {
 
@@ -56,6 +57,7 @@ namespace rocksdb {
 	class YulInlineSkipList {
 	public:
 		struct Node;
+		std::mutex inplace_mutex_;
 	private:
 		struct Splice;
 
@@ -111,6 +113,27 @@ namespace rocksdb {
 
 		// Like Insert, but external synchronization is not required.
 		Node* InsertConcurrently(const char* key);
+
+		static inline uint64_t GetSequenceNum(const char* internal_key) {
+			Slice akey = GetLengthPrefixedSlice(internal_key);
+			const uint64_t anum = DecodeFixed64(akey.data() + akey.size() - 8) >> 8;
+			return anum;
+
+		}
+
+		Node* UpdateNode(const char* key, Node* hint) {
+			if (hint == nullptr) {
+				// Hiht 가 없다는 말은 해당 Node가 아직 업데이트 안된거임.
+				return InsertConcurrently(key);
+			}
+			std::unique_lock<std::mutex> lock(inplace_mutex_);
+			auto org = GetSequenceNum(hint->Key());
+			auto upd = GetSequenceNum(key);
+			if (org < upd) {
+				hint->StashKey(key);
+			}
+			return nullptr;
+		}
 
 		// Inserts a node into the skip list.  key must have been allocated by
 		// AllocateKey and then filled in by the caller.  If UseCAS is true,
@@ -173,6 +196,10 @@ namespace rocksdb {
 			void Seek(const char* target, Node* hint);
 
 			void SetNode(Node* p);
+
+			inline bool isNodeEqual(Node* p) const {
+				return node_ == p;
+			}
 
 			// Invalidate This Iterator
 			void Invalidate();
@@ -304,19 +331,49 @@ namespace rocksdb {
 		// Stores the height of the node in the memory location normally used for
 		// next_[0].  This is used for passing data from AllocateKey to Insert.
 		void StashHeight(const int height) {
-			assert(sizeof(int) <= sizeof(next_[0]));
-			memcpy(&next_[0], &height, sizeof(int));
+			assert(sizeof(int) <= sizeof(next_[-1]));
+			memcpy(&next_[-1], &height, sizeof(int));
 		}
 
 		// Retrieves the value passed to StashHeight.  Undefined after a call
 		// to SetNext or NoBarrier_SetNext.
 		int UnstashHeight() const {
 			int rv;
-			memcpy(&rv, &next_[0], sizeof(int));
+			memcpy(&rv, &next_[-1], sizeof(int));
 			return rv;
 		}
 
-		const char* Key() const { return reinterpret_cast<const char*>(&next_[1]); }
+		void StashKey(const char* key) {
+			assert(sizeof(const char*) <= sizeof(next_[1]));
+			//std::atomic<Node*> x = reinterpret_cast<Node*>(const_cast<char*>(key)) - 1;
+			//auto a = &next_[0];
+			//auto orig = a->load(std::memory_order_relaxed);
+			//auto c = reinterpret_cast<std::atomic<Node*>>(&key);
+			//std::atomic<std::atomic<Node*>*>b = a;
+			//memcpy(a, &key, sizeof(const char*));
+			//a->compare_exchange_weak(a, x);
+			//b.compare_exchange_weak(a, &x);
+			//a->compare_exchange_weak(orig, c);
+			memcpy(&next_[0], &key, sizeof(const char*));
+			//auto a = &next_[0];
+			//memcpy(a, &key, sizeof(const char*));
+			//std::cout << typeid(a).name() << std::endl;
+		}
+
+		// Retrieves the value passed to StashHeight.  Undefined after a call
+		// to SetNext or NoBarrier_SetNext.
+		const char* UnstashKey() const {
+			const char* rv;
+			memcpy(&rv, &next_[0], sizeof(const char*));
+			return rv;
+		}
+
+		const char* Key() const { 
+			const char* ikey = UnstashKey();
+			if(ikey == nullptr)
+				return reinterpret_cast<const char*>(&next_[1]); 
+			return ikey;
+		}
 
 		// Accessors/mutators for links.  Wrapped in methods so we can add
 		// the appropriate barriers as necessary, and perform the necessary
@@ -325,30 +382,30 @@ namespace rocksdb {
 			assert(n >= 0);
 			// Use an 'acquire load' so that we observe a fully initialized
 			// version of the returned Node.
-			return (next_[-n].load(std::memory_order_acquire));
+			return (next_[-n-1].load(std::memory_order_acquire));
 		}
 
 		void SetNext(int n, Node* x) {
 			assert(n >= 0);
 			// Use a 'release store' so that anybody who reads through this
 			// pointer observes a fully initialized version of the inserted node.
-			next_[-n].store(x, std::memory_order_release);
+			next_[-n-1].store(x, std::memory_order_release);
 		}
 
 		bool CASNext(int n, Node* expected, Node* x) {
 			assert(n >= 0);
-			return next_[-n].compare_exchange_strong(expected, x);
+			return next_[-n-1].compare_exchange_strong(expected, x);
 		}
 
 		// No-barrier variants that can be safely used in a few locations.
 		Node* NoBarrier_Next(int n) {
 			assert(n >= 0);
-			return next_[-n].load(std::memory_order_relaxed);
+			return next_[-n-1].load(std::memory_order_relaxed);
 		}
 
 		void NoBarrier_SetNext(int n, Node* x) {
 			assert(n >= 0);
-			next_[-n].store(x, std::memory_order_relaxed);
+			next_[-n-1].store(x, std::memory_order_relaxed);
 		}
 
 		// Insert node after prev on specific level.
@@ -692,7 +749,7 @@ namespace rocksdb {
 	template <class Comparator>
 	typename YulInlineSkipList<Comparator>::Node*
 		YulInlineSkipList<Comparator>::AllocateNode(size_t key_size, int height) {
-		auto prefix = sizeof(std::atomic<Node*>) * (height - 1);
+		auto prefix = sizeof(std::atomic<Node*>) * (height - 1) + sizeof(const char*);
 
 		// prefix is space for the height - 1 pointers that we store before
 		// the Node instance (next_[-(height - 1) .. -1]).  Node starts at
@@ -710,6 +767,7 @@ namespace rocksdb {
 		// using the pointers at the moment, StashHeight temporarily borrow
 		// storage from next_[0] for that purpose.
 		x->StashHeight(height);
+		x->StashKey(nullptr);
 		return x;
 	}
 
@@ -803,8 +861,8 @@ namespace rocksdb {
 			bool allow_partial_splice_fix) {
 		Node* x = reinterpret_cast<Node*>(const_cast<char*>(key)) - 1;
 		int height = x->UnstashHeight();
-		assert(height >= 1 && height <= kMaxHeight_);
 
+		assert(height >= 1 && height <= kMaxHeight_);
 		int max_height = max_height_.load(std::memory_order_relaxed);
 		while (height > max_height) {
 			if (max_height_.compare_exchange_weak(max_height, height)) {
@@ -1057,4 +1115,4 @@ namespace rocksdb {
 	}
 
 }  // namespace rocksdb
-  // namespace rocksdb    // namespace rocksdb  
+
