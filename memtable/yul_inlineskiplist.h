@@ -445,7 +445,7 @@ namespace rocksdb {
 	template <class Comparator>
 	inline void YulInlineSkipList<Comparator>::Iterator::SeekToFirst() {
 		node_ = list_->head_->Next(0);
-		list_->GetAllSkiplist();
+//		list_->GetAllSkiplist();
 	}
 
 	template <class Comparator>
