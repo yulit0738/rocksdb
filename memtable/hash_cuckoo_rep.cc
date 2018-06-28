@@ -97,7 +97,7 @@ namespace rocksdb {
 				char* indexmem = reinterpret_cast<char*>(
 					yul_arena_.Allocate(sizeof(const char*) * bucket_count_));
 				yul_index_array_ = new (indexmem) std::atomic<KeyIndex::Node*>[bucket_count_];
-				
+
 				for (unsigned int bid = 0; bid < bucket_count_; ++bid) {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
 					yul_index_array_[bid].store(nullptr, std::memory_order_relaxed);
@@ -339,7 +339,7 @@ namespace rocksdb {
 			// YUIL
 			// boolean for Wakeup Signal
 			bool yul_background_worker_done;
-			
+
 			// YUIL
 			// need to support Snapshot so we prepare some tricky flag for snapshot :)
 			std::atomic<short> yul_snapshot_count;
@@ -355,7 +355,7 @@ namespace rocksdb {
 			// YUIL
 			KeyIndex KeyIndex_;
 			std::atomic<KeyIndex::Node*>* yul_index_array_;
-			
+
 			// returns the bucket id assogied to the input slice based on the
 			unsigned int GetHash(const Slice& slice, const int hash_func_id) const {
 				// the seeds used in the Murmur hash to produce different hash functions.
@@ -465,7 +465,7 @@ namespace rocksdb {
 				//	}
 				//}
 
-				std::unique_lock<std::mutex> lock(KeyIndex_.inplace_mutex_);
+				//std::unique_lock<std::mutex> lock(KeyIndex_.inplace_mutex_);
 				auto org = GetSequenceNum(shortcut->Key());
 				auto upd = GetSequenceNum(key);
 				if (org < upd) {
@@ -560,8 +560,8 @@ namespace rocksdb {
 			// the returned iterator.
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
 				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
-				      //매번 Add하게 하면 느려짐
-				      yul_snapshot_count.fetch_add(1, std::memory_order_release);
+					//매번 Add하게 하면 느려짐
+					yul_snapshot_count.fetch_add(1, std::memory_order_release);
 				}
 
 				auto todo = yul_background_worker_todo_ops.load(std::memory_order_relaxed);

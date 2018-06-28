@@ -50,6 +50,8 @@
 #include "util/allocator.h"
 #include "util/random.h"
 #include <mutex>
+#include <typeinfo>
+#include <iostream>
 
 namespace rocksdb {
 
@@ -57,7 +59,7 @@ namespace rocksdb {
 	class YulInlineSkipList {
 	public:
 		struct Node;
-		std::mutex inplace_mutex_;
+		//std::mutex inplace_mutex_;
 	private:
 		struct Splice;
 
@@ -126,7 +128,6 @@ namespace rocksdb {
 				// Hiht 가 없다는 말은 해당 Node가 아직 업데이트 안된거임.
 				return InsertConcurrently(key);
 			}
-			std::unique_lock<std::mutex> lock(inplace_mutex_);
 			auto org = GetSequenceNum(hint->Key());
 			auto upd = GetSequenceNum(key);
 			if (org < upd) {
@@ -343,21 +344,47 @@ namespace rocksdb {
 			return rv;
 		}
 
+		void InitKey() {
+			const char* t = nullptr;
+			memcpy(&next_[0], &t, sizeof(const char*));
+		}
+
 		void StashKey(const char* key) {
 			assert(sizeof(const char*) <= sizeof(next_[1]));
-			//std::atomic<Node*> x = reinterpret_cast<Node*>(const_cast<char*>(key)) - 1;
-			//auto a = &next_[0];
-			//auto orig = a->load(std::memory_order_relaxed);
-			//auto c = reinterpret_cast<std::atomic<Node*>>(&key);
-			//std::atomic<std::atomic<Node*>*>b = a;
-			//memcpy(a, &key, sizeof(const char*));
-			//a->compare_exchange_weak(a, x);
-			//b.compare_exchange_weak(a, &x);
-			//a->compare_exchange_weak(orig, c);
-			memcpy(&next_[0], &key, sizeof(const char*));
-			//auto a = &next_[0];
-			//memcpy(a, &key, sizeof(const char*));
-			//std::cout << typeid(a).name() << std::endl;
+			//memcpy(&next_[0], &key, sizeof(const char*));
+			/*
+			struct std::atomic<Node *> * 
+			*/
+			while (true) {
+				std::atomic<Node*>* target = &next_[0];
+				Node* orig = next_[0].load(std::memory_order_relaxed);
+				std::atomic<Node*> v(reinterpret_cast<Node*>(const_cast<char*>(key)));
+				if (orig == nullptr) {
+					if (target->compare_exchange_weak(orig, v))
+						break;
+				}
+				else {
+					auto org = GetSequenceNum(Key());
+					auto upd = GetSequenceNum(key);
+					if (org < upd) {
+						if (target->compare_exchange_weak(orig, v))
+							break;
+					}
+					else {
+						break;
+					}
+				}
+			}
+
+			/*auto exp = next_[0].load(std::memory_order_relaxed);
+			std::atomic_compare_exchange_weak_explicit(
+				&target,
+				&exp,
+				key,
+				std::memory_order_release,
+				std::memory_order_relaxed);
+			*///std::atomic<Node>* p = &next_[0];
+
 		}
 
 		// Retrieves the value passed to StashHeight.  Undefined after a call
@@ -368,10 +395,10 @@ namespace rocksdb {
 			return rv;
 		}
 
-		const char* Key() const { 
+		const char* Key() const {
 			const char* ikey = UnstashKey();
-			if(ikey == nullptr)
-				return reinterpret_cast<const char*>(&next_[1]); 
+			if (ikey == nullptr)
+				return reinterpret_cast<const char*>(&next_[1]);
 			return ikey;
 		}
 
@@ -382,30 +409,30 @@ namespace rocksdb {
 			assert(n >= 0);
 			// Use an 'acquire load' so that we observe a fully initialized
 			// version of the returned Node.
-			return (next_[-n-1].load(std::memory_order_acquire));
+			return (next_[-n - 1].load(std::memory_order_acquire));
 		}
 
 		void SetNext(int n, Node* x) {
 			assert(n >= 0);
 			// Use a 'release store' so that anybody who reads through this
 			// pointer observes a fully initialized version of the inserted node.
-			next_[-n-1].store(x, std::memory_order_release);
+			next_[-n - 1].store(x, std::memory_order_release);
 		}
 
 		bool CASNext(int n, Node* expected, Node* x) {
 			assert(n >= 0);
-			return next_[-n-1].compare_exchange_strong(expected, x);
+			return next_[-n - 1].compare_exchange_strong(expected, x);
 		}
 
 		// No-barrier variants that can be safely used in a few locations.
 		Node* NoBarrier_Next(int n) {
 			assert(n >= 0);
-			return next_[-n-1].load(std::memory_order_relaxed);
+			return next_[-n - 1].load(std::memory_order_relaxed);
 		}
 
 		void NoBarrier_SetNext(int n, Node* x) {
 			assert(n >= 0);
-			next_[-n-1].store(x, std::memory_order_relaxed);
+			next_[-n - 1].store(x, std::memory_order_relaxed);
 		}
 
 		// Insert node after prev on specific level.
@@ -767,7 +794,7 @@ namespace rocksdb {
 		// using the pointers at the moment, StashHeight temporarily borrow
 		// storage from next_[0] for that purpose.
 		x->StashHeight(height);
-		x->StashKey(nullptr);
+		x->InitKey();
 		return x;
 	}
 
