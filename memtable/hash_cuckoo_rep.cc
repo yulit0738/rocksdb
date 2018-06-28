@@ -471,6 +471,7 @@ namespace rocksdb {
 						auto org = GetSequenceNum(skipp->Key());
 						auto upd = GetSequenceNum(p->Key());
 						if (org > upd) {
+							printf("%zd to %zd\n", org, upd);
 							if (yul_index_skip_array_[job.bucket_id].compare_exchange_weak(skipp, p, std::memory_order_release))
 								break;
 						}
@@ -1349,7 +1350,7 @@ namespace rocksdb {
 						}
 					}
 				}
-				if (sp != nullptr && cit_->isNodeEqual(sp)) {
+				if (sp != nullptr && !cit_->isNodeEqual(sp)) {
 					cit_->SetNode(sp);
 				}
 			}
