@@ -174,8 +174,8 @@ namespace rocksdb {
 
 			void SetNode(Node* p);
 
-			bool isNodeEqual(Node* p) {
-				return node_ == p;
+			bool isNextNodeEqual(Node* p) {
+				return node_ == p->NoBarrier_Next(0);
 			}
 
 			// Invalidate This Iterator
@@ -445,7 +445,7 @@ namespace rocksdb {
 	template <class Comparator>
 	inline void YulInlineSkipList<Comparator>::Iterator::SeekToFirst() {
 		node_ = list_->head_->Next(0);
-//		list_->GetAllSkiplist();
+		//		list_->GetAllSkiplist();
 	}
 
 	template <class Comparator>
@@ -1061,4 +1061,3 @@ namespace rocksdb {
 	}
 
 }  // namespace rocksdb
-   // namespace rocksdb    // namespace rocksdb  

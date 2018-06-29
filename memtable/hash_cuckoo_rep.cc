@@ -124,7 +124,7 @@ namespace rocksdb {
 			}
 
 			// return false, indicating HashCuckooRep does not support merge operator.
-			virtual bool IsMergeOperatorSupported() const override { return true; }
+			virtual bool IsMergeOperatorSupported() const override { return false; }
 
 			// return false, indicating HashCuckooRep does not support snapshot.
 			virtual bool IsSnapshotSupported() const override { return true; }
@@ -1349,7 +1349,7 @@ namespace rocksdb {
 						}
 					}
 				}
-				if (sp != nullptr && !cit_->isNodeEqual(sp)) {
+				if (sp != nullptr && !cit_->isNextNodeEqual(sp)) {
 					cit_->SetNode(sp);
 				}
 			}
