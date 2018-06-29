@@ -343,6 +343,11 @@ namespace rocksdb {
 			return rv;
 		}
 
+		void InitKey() {
+			assert(sizeof(const char*) <= sizeof(next_[0]));
+			const char* t = nullptr;
+			memcpy(&next_[0], &t, sizeof(const char*));
+		}
 		void StashKey(const char* key) {
 			assert(sizeof(const char*) <= sizeof(next_[0]));
 			//memcpy(&next_[0], &key, sizeof(const char*));
@@ -787,7 +792,7 @@ namespace rocksdb {
 		// using the pointers at the moment, StashHeight temporarily borrow
 		// storage from next_[0] for that purpose.
 		x->StashHeight(height);
-		x->StashKey(nullptr);
+		x->InitKey();
 		return x;
 	}
 

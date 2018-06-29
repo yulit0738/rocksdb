@@ -91,7 +91,7 @@ namespace rocksdb {
 				yul_index_array_(nullptr),
 				yul_background_worker_done(true) {
 				char* mem = reinterpret_cast<char*>(
-					yul_arena_.Allocate(sizeof(std::atomic<const char*>) * bucket_count_));
+					allocator_->Allocate(sizeof(std::atomic<const char*>) * bucket_count_));
 				cuckoo_array_ = new (mem) std::atomic<char*>[bucket_count_];
 				/* Shortcut pointer init */
 				char* indexmem = reinterpret_cast<char*>(
