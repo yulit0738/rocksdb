@@ -113,7 +113,7 @@ namespace rocksdb {
 			}
 
 			// return false, indicating HashCuckooRep does not support merge operator.
-			virtual bool IsMergeOperatorSupported() const override { return true; }
+			virtual bool IsMergeOperatorSupported() const override { return false; }
 
 			// return false, indicating HashCuckooRep does not support snapshot.
 			virtual bool IsSnapshotSupported() const override { return true; }
@@ -762,10 +762,10 @@ namespace rocksdb {
 					// 마지막 Path 만 Compare And Swap 해보고 안되면 Path 다시 찾게 하면됨
 					int kicked_out_bid = local_cuckoo_path_[0];
 					int current_bid = local_cuckoo_path_[1];
-					yul_index_array_[current_bid].store(yul_index_array_[kicked_out_bid], std::memory_order_release);
 					indexkey = cuckoo_array_[current_bid].load(std::memory_order_relaxed);
 					char* st_key = cuckoo_array_[kicked_out_bid].load(std::memory_order_relaxed);
 					if (st_key == nullptr && cuckoo_array_[kicked_out_bid].compare_exchange_weak(st_key, indexkey)) {
+						yul_index_array_[current_bid].store(yul_index_array_[kicked_out_bid], std::memory_order_release);
 						//InsertJobConcurrently(IndexJob(indexkey, static_cast<unsigned int>(kicked_out_bid), kIndexJobUpdate));
 						for (size_t i = 2; i < cuckoo_path_length; ++i) {
 							kicked_out_bid = local_cuckoo_path_[i - 1];
@@ -781,6 +781,8 @@ namespace rocksdb {
 						}
 						int insert_key_bid = local_cuckoo_path_[cuckoo_path_length - 1];
 						cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
+						KeyIndex::Node* h = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+						yul_index_array_[insert_key_bid].store(h, std::memory_order_release);
 						cuckoo_path_building_mutex_.unlock();
 						//InsertIndexData(indexkey, insert_key_bid);
 						InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobCollisionModification));
@@ -869,9 +871,9 @@ namespace rocksdb {
 				yul_index_array_[kicked_out_bid].store(yul_index_array_[current_bid].load(std::memory_order_relaxed), std::memory_order_release);
 			}
 			int insert_key_bid = cuckoo_path_[cuckoo_path_length - 1];
-			//printf("insert key bid : %d | Before Insert Key : ", insert_key_bid); PrintKey(cuckoo_array_[insert_key_bid].load());
 			cuckoo_array_[insert_key_bid].store(key, std::memory_order_release);
-			//printf("insert key bid : %d | Before Insert Key : ", insert_key_bid); PrintKey(cuckoo_array_[insert_key_bid].load());
+			KeyIndex::Node* h = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			yul_index_array_[insert_key_bid].store(h, std::memory_order_release);
 			//InsertIndexData(indexkey, insert_key_bid);
 			InsertJobConcurrently(IndexJob(key, static_cast<unsigned int>(insert_key_bid), kIndexJobCollisionModification));
 		}

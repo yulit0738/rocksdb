@@ -50,8 +50,6 @@
 #include "util/allocator.h"
 #include "util/random.h"
 #include <mutex>
-#include <typeinfo>
-#include <iostream>
 
 namespace rocksdb {
 
@@ -128,6 +126,7 @@ namespace rocksdb {
 				// Hiht 가 없다는 말은 해당 Node가 아직 업데이트 안된거임.
 				return InsertConcurrently(key);
 			}
+			//std::unique_lock<std::mutex> lock(inplace_mutex_);
 			auto org = GetSequenceNum(hint->Key());
 			auto upd = GetSequenceNum(key);
 			if (org < upd) {
@@ -344,17 +343,20 @@ namespace rocksdb {
 			return rv;
 		}
 
-		void InitKey() {
-			const char* t = nullptr;
-			memcpy(&next_[0], &t, sizeof(const char*));
-		}
-
 		void StashKey(const char* key) {
-			assert(sizeof(const char*) <= sizeof(next_[1]));
+			assert(sizeof(const char*) <= sizeof(next_[0]));
 			//memcpy(&next_[0], &key, sizeof(const char*));
-			/*
-			struct std::atomic<Node *> * 
-			*/
+
+			//if (Key() != nullptr && key != nullptr) {
+			//	Slice mkey = GetLengthPrefixedSlice(Key());
+			//	Slice kkey = Slice(mkey.data(), mkey.size() - 8);
+			//	Slice mkey2 = GetLengthPrefixedSlice(key);
+			//	Slice kkey2 = Slice(mkey2.data(), mkey2.size() - 8);
+			//	if (kkey != kkey2) {
+			//		printf("Problem From Key : "); PrintKey(Key());
+			//		printf("Problem To Key : "); PrintKey(key);
+			//	}
+			//}
 			while (true) {
 				std::atomic<Node*>* target = &next_[0];
 				Node* orig = next_[0].load(std::memory_order_relaxed);
@@ -376,15 +378,6 @@ namespace rocksdb {
 				}
 			}
 
-			/*auto exp = next_[0].load(std::memory_order_relaxed);
-			std::atomic_compare_exchange_weak_explicit(
-				&target,
-				&exp,
-				key,
-				std::memory_order_release,
-				std::memory_order_relaxed);
-			*///std::atomic<Node>* p = &next_[0];
-
 		}
 
 		// Retrieves the value passed to StashHeight.  Undefined after a call
@@ -396,10 +389,7 @@ namespace rocksdb {
 		}
 
 		const char* Key() const {
-			const char* ikey = UnstashKey();
-			if (ikey == nullptr)
-				return reinterpret_cast<const char*>(&next_[1]);
-			return ikey;
+			return reinterpret_cast<const char*>(&next_[1]);
 		}
 
 		// Accessors/mutators for links.  Wrapped in methods so we can add
@@ -470,7 +460,10 @@ namespace rocksdb {
 	template <class Comparator>
 	inline const char* YulInlineSkipList<Comparator>::Iterator::key() const {
 		assert(Valid());
-		return node_->Key();
+		const char* ikey = node_->UnstashKey();
+		if (ikey == nullptr)
+			return node_->Key();
+		return ikey;
 	}
 
 	template <class Comparator>
@@ -794,7 +787,7 @@ namespace rocksdb {
 		// using the pointers at the moment, StashHeight temporarily borrow
 		// storage from next_[0] for that purpose.
 		x->StashHeight(height);
-		x->InitKey();
+		x->StashKey(nullptr);
 		return x;
 	}
 
