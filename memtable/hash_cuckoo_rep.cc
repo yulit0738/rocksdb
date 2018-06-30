@@ -1333,6 +1333,7 @@ namespace rocksdb {
 #endif
 			//printf("dup : %zd | ocup : %zd | %f\n", list_->dup_count_, list_->occupied_count_.load(std::memory_order_relaxed),
 			//	static_cast<double>(list_->dup_count_ / list_->occupied_count_.load(std::memory_order_relaxed)));
+			
 			if (list_->is_there_dupliacated_key) {
 				Slice obj = GetLengthPrefixedSlice(cit_->key());
 				Slice ukey = Slice(obj.data(), obj.size() - 8);
@@ -1349,11 +1350,12 @@ namespace rocksdb {
 						}
 					}
 				}
-				if (sp != nullptr && !cit_->isNextNodeEqual(sp)) {
+				if (sp != nullptr && cit_->isNextNodeEqual(sp)) {
 					cit_->SetNode(sp);
 				}
 			}
 			cit_->Next();
+
 		}
 
 		// Advances to the previous position.

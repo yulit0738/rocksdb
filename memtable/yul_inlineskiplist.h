@@ -175,7 +175,9 @@ namespace rocksdb {
 			void SetNode(Node* p);
 
 			bool isNextNodeEqual(Node* p) {
-				return node_ == p->NoBarrier_Next(0);
+				// return node_ == p->NoBarrier_Next(0) || node_->NoBarrier_Next(0) == p || node_ == p;
+				return node_->NoBarrier_Next(0) != nullptr && 
+					(GetLengthPrefixedSlice(node_->NoBarrier_Next(0)->Key()) == GetLengthPrefixedSlice(p->Key()));
 			}
 
 			// Invalidate This Iterator
