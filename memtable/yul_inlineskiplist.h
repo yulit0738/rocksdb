@@ -49,6 +49,7 @@
 #include "port/port.h"
 #include "util/allocator.h"
 #include "util/random.h"
+#include "util/coding.h"
 #include <mutex>
 
 namespace rocksdb {
@@ -72,7 +73,7 @@ namespace rocksdb {
 			int32_t max_height = 12,
 			int32_t branching_factor = 4);
 
-		void GetAllSkiplist() const {
+		void GetAllSkiplist() {
 			Node* x = head_;
 			Node* next = x->Next(0);
 			printf("====================================================================================\n");
@@ -113,6 +114,24 @@ namespace rocksdb {
 
 		// Like Insert, but external synchronization is not required.
 		Node* InsertConcurrently(const char* key);
+
+		inline void PrintKey(const char* ikey)
+		{
+			if (ikey != nullptr) {
+				Slice key = GetLengthPrefixedSlice(ikey);
+				Slice kkey = Slice(key.data(), key.size() - 8);
+				const uint64_t anum = DecodeFixed64(key.data() + key.size() - 8) >> 8;
+				std::string tmp;
+				tmp.assign(kkey.data(), kkey.size());
+				//unsigned int val = next->value;
+				printf("KEY : %16s | SEQ : %zu | VALUE : %s\n", tmp.c_str(), anum, tmp.c_str());
+			}
+		}
+
+		Slice UserKey(const char* key) const {
+			Slice slice = GetLengthPrefixedSlice(key);
+			return Slice(slice.data(), slice.size() - 8);
+		}
 
 		static inline uint64_t GetSequenceNum(const char* internal_key) {
 			Slice akey = GetLengthPrefixedSlice(internal_key);
@@ -989,6 +1008,24 @@ namespace rocksdb {
 		assert(recompute_height <= max_height);
 		if (recompute_height > 0) {
 			RecomputeSpliceLevels(key, splice, recompute_height);
+		}
+
+		/* Inplace Code added - YUIL */
+		if (splice->prev_[0] != nullptr && splice->prev_[0] != head_) {
+			Slice pKey = UserKey(splice->prev_[0]->Key());
+			Slice cKey = UserKey(x->Key());
+			if (pKey == cKey) {
+				UpdateNode(x->Key(), splice->prev_[0]);
+				return x;
+			}
+		}
+		if (splice->next_[0] != nullptr) {
+			Slice pKey = UserKey(splice->next_[0]->Key());
+			Slice cKey = UserKey(x->Key());
+			if (pKey == cKey) {
+				UpdateNode(x->Key(), splice->next_[0]);
+				return x;
+			}
 		}
 
 		bool splice_is_valid = true;

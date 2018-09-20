@@ -1002,7 +1002,8 @@ enum RepFactory {
   kPrefixHash,
   kVectorRep,
   kHashLinkedList,
-  kCuckoo
+  kCuckoo,
+  kYulSkipList
 };
 
 static enum RepFactory StringToRepFactory(const char* ctype) {
@@ -1018,6 +1019,8 @@ static enum RepFactory StringToRepFactory(const char* ctype) {
     return kHashLinkedList;
   else if (!strcasecmp(ctype, "cuckoo"))
     return kCuckoo;
+  else if (!strcasecmp(ctype, "yulskiplist"))
+	return kYulSkipList;
 
   fprintf(stdout, "Cannot parse memreptable %s\n", ctype);
   return kSkipList;
@@ -2026,6 +2029,9 @@ class Benchmark {
       case kCuckoo:
         fprintf(stdout, "Memtablerep: cuckoo\n");
         break;
+      case kYulSkipList:
+        fprintf(stdout, "Memtablerep: yul_skiplist\n");
+        break;
     }
     fprintf(stdout, "Perf Level: %d\n", FLAGS_perf_level);
 
@@ -3027,6 +3033,10 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     switch (FLAGS_rep_factory) {
       case kSkipList:
         options.memtable_factory.reset(new SkipListFactory(
+            FLAGS_skip_list_lookahead));
+        break;
+      case kYulSkipList:
+        options.memtable_factory.reset(new YulSkipListFactory(
             FLAGS_skip_list_lookahead));
         break;
 #ifndef ROCKSDB_LITE
