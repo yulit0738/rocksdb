@@ -126,6 +126,76 @@ namespace rocksdb {
 				return static_cast<KeyHandle>(*buf);
 			}
 
+			virtual KeyHandle Allocate(const size_t len, char** buf, bool& occupied,
+				const uint64_t& meta,
+				const Slice& key, /* user key */
+				const Slice& value) override {
+				/* 
+					1. Duplicated Key 인지 Check
+					2. Inplace Update 가능한지 Check 그렇지 않다면 새로운 공간 할당
+					3. Inplace Update 가능하다면 시도
+				*/
+				int bucket_ids[HashCuckooRepFactory::kMaxHashCount];
+				for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
+					bucket_ids[hid] = GetHash(key, hid);
+					const char* stored_key =
+						cuckoo_array_[bucket_ids[hid]].load(std::memory_order_relaxed);
+					if (stored_key != nullptr) {
+						const auto bucket_user_key = UserKey(stored_key);
+						if (bucket_user_key.compare(key) == 0) {
+							/* Duplicated Key Checked */
+							occupied = true;
+							KeyIndex::Node* hint = yul_index_array_[bucket_ids[hid]];
+							if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+								uint32_t key_length = 0;
+								const char* key_ptr = GetVarint32Ptr(stored_key, stored_key + 5, &key_length);
+
+								/* 이미 위에서 UserKey와 동일한지 Check 함. Metadata Unpacking */
+								const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
+								ValueType type;
+								SequenceNumber existing_seq;
+								SequenceNumber target_seq;
+								UnPackSequenceAndType(tag, &target_seq, &type);
+								UnPackSequenceAndType(tag, &existing_seq, &type);
+								/* Size를 비교해서 만약 덮어쓰려는 Size가 더 작으면 그대로 Overwrite */
+								/* 더 크다면 새로운 Block 할당해서 포인터 교체 */
+								if (target_seq < existing_seq) return nullptr;
+								if (type == kTypeValue) {
+								Slice prev_value = GetLengthPrefixedSlice(key_ptr + key_length);
+									uint32_t prev_size = static_cast<uint32_t>(prev_value.size());
+									uint32_t new_size = static_cast<uint32_t>(value.size());
+
+									// Update value, if new value size  <= previous value size
+									if (new_size <= prev_size) {
+										// entry format is:
+										//    klength  varint32
+										//    userkey  char[klength-8]
+										//    tag      uint64
+										//    vlength  varint32
+										//    value    char[vlength]
+
+										/* Seq + type */
+										EncodeFixed64(const_cast<char*>(key_ptr) + key_length - 8, meta);
+										/* Value overwrite */
+										char* p =
+											EncodeVarint32(const_cast<char*>(key_ptr) + key_length, new_size);
+										memcpy(p, value.data(), value.size());
+
+										// Inplace update 하고 그냥 종료
+										return nullptr;
+									}
+								}
+							} // Snapshot 지원 안해도 될때 
+							else {
+								break;
+							} // Snapshot 지원해야 할 때
+						}
+					}
+				}
+				*buf = KeyIndex_.AllocateKey(len);
+				return static_cast<KeyHandle>(*buf);
+			}
+
 			virtual ~HashCuckooRep() override {
 				yul_background_worker_terminate.store(true, std::memory_order_release);
 				if (yul_background_worker_done) yul_background_worker_cv.notify_all();
@@ -328,6 +398,9 @@ namespace rocksdb {
 			std::condition_variable yul_background_worker_cv;
 			std::condition_variable yul_background_worker_done_cv;
 
+			// YUIL
+			// Mutex for in-place update
+			std::mutex yul_inplace_update_mutex;
 			// YUIL
 			// Mutex for background workers
 			std::mutex yul_background_worker_mutex;

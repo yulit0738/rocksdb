@@ -87,6 +87,18 @@ class MemTableRep {
   // prefetching more efficient.
   virtual KeyHandle Allocate(const size_t len, char** buf);
 
+  // YUIL
+  // Allocate a buf of len size for storing key. The idea is that a
+  // specific memtable representation knows its underlying data structure
+  // better. By allowing it to allocate memory, it can possibly put
+  // correlated stuff in consecutive memory area to make processor
+  // prefetching more efficient.
+  virtual KeyHandle Allocate(const size_t len, char** buf, bool& occupied, 
+	  const uint64_t& meta,
+	  const Slice& key, /* user key */
+	  const Slice& value);
+
+
   // Insert key into the collection. (The caller will pack key and value into a
   // single buffer and pass that in as the parameter to Insert).
   // REQUIRES: nothing that compares equal to key is currently in the

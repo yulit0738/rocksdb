@@ -83,6 +83,7 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
       is_range_del_table_empty_(true),
       data_size_(0),
       num_entries_(0),
+	  is_yul_cuckoo_(false),
       num_deletes_(0),
       write_buffer_size_(mutable_cf_options.write_buffer_size),
       flush_in_progress_(false),
@@ -105,6 +106,8 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
   UpdateFlushState();
   // something went wrong if we need to flush before inserting anything
   assert(!ShouldScheduleFlush());
+  Slice MemTName = ioptions.memtable_factory->Name();
+  if (MemTName == "HashCuckooRepFactory") is_yul_cuckoo_ = true;
 
   if (prefix_extractor_ && moptions_.memtable_prefix_bloom_bits > 0) {
     prefix_bloom_.reset(new DynamicBloom(
@@ -230,14 +233,14 @@ int MemTable::KeyComparator::operator()(const char* prefix_len_key1,
 }
 
 int MemTable::KeyComparator::operator()(const char* prefix_len_key,
-                                        const KeyComparator::DecodedType& key)
+                                        const Slice& key)
     const {
   // Internal keys are encoded as length-prefixed strings.
   Slice a = GetLengthPrefixedSlice(prefix_len_key);
   return comparator.CompareKeySeq(a, key);
 }
 
-void MemTableRep::InsertConcurrently(KeyHandle /*handle*/) {
+void MemTableRep::InsertConcurrently(KeyHandle handle) {
 #ifndef ROCKSDB_LITE
   throw std::runtime_error("concurrent insert not supported");
 #else
@@ -253,6 +256,14 @@ Slice MemTableRep::UserKey(const char* key) const {
 KeyHandle MemTableRep::Allocate(const size_t len, char** buf) {
   *buf = allocator_->Allocate(len);
   return static_cast<KeyHandle>(*buf);
+}
+
+KeyHandle MemTableRep::Allocate(const size_t len, char** buf, bool& occupied,
+	const uint64_t& meta,
+	const Slice& key, /* user key */
+	const Slice& value) {
+	*buf = allocator_->Allocate(len);
+	return static_cast<KeyHandle>(*buf);
 }
 
 // Encode a suitable internal key target for "target" and return it.
@@ -443,7 +454,6 @@ MemTable::MemTableStats MemTable::ApproximateStats(const Slice& start_ikey,
   uint64_t data_size = data_size_.load(std::memory_order_relaxed);
   return {entry_count * (data_size / n), entry_count};
 }
-
 bool MemTable::AddForNotifying(SequenceNumber s, ValueType type,
 	const Slice& key,
 	const Slice& value) {
@@ -475,7 +485,6 @@ bool MemTable::AddForNotifying(SequenceNumber s, ValueType type,
 	assert((unsigned)(p + val_size - buf) == (unsigned)encoded_len);
 	return table->InsertKey(handle);
 }
-
 bool MemTable::Add(SequenceNumber s, ValueType type,
                    const Slice& key, /* user key */
                    const Slice& value, bool allow_concurrent,
@@ -492,10 +501,20 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
                                internal_key_size + VarintLength(val_size) +
                                val_size;
   char* buf = nullptr;
+  KeyHandle handle = nullptr;
   std::unique_ptr<MemTableRep>& table =
       type == kTypeRangeDeletion ? range_del_table_ : table_;
-  KeyHandle handle = table->Allocate(encoded_len, &buf);
-
+  if (is_yul_cuckoo_) {
+	   bool occupied = false;
+	   uint64_t packed = PackSequenceAndType(s, type);
+	   handle = table->Allocate(encoded_len, &buf, occupied, packed, key, value);
+	   if (handle == nullptr) 
+		   return true;
+  }
+  else {
+	  handle = table->Allocate(encoded_len, &buf);
+  }
+  
   char* p = EncodeVarint32(buf, internal_key_size);
   memcpy(p, key.data(), key_size);
   Slice key_slice(p, key_size);
@@ -512,12 +531,12 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
         insert_with_hint_prefix_extractor_->InDomain(key_slice)) {
       Slice prefix = insert_with_hint_prefix_extractor_->Transform(key_slice);
       bool res = table->InsertKeyWithHint(handle, &insert_hints_[prefix]);
-      if (UNLIKELY(!res)) {
+      if (!res) {
         return res;
       }
     } else {
       bool res = table->InsertKey(handle);
-      if (UNLIKELY(!res)) {
+      if (!res) {
         return res;
       }
     }
@@ -553,7 +572,7 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
     UpdateFlushState();
   } else {
     bool res = table->InsertKeyConcurrently(handle);
-    if (UNLIKELY(!res)) {
+    if (!res) {
       return res;
     }
 
@@ -993,8 +1012,6 @@ void MemTableRep::Get(const LookupKey& k, void* callback_args,
        iter->Valid() && callback_func(callback_args, iter->key());
        iter->Next()) {
   }
-//	  printf("Found From MemtableRep : ");
-//	  PrintKey(iter->key());
 }
 
 void MemTable::RefLogContainingPrepSection(uint64_t log) {
@@ -1011,3 +1028,4 @@ uint64_t MemTable::GetMinLogContainingPrepSection() {
 }
 
 }  // namespace rocksdb
+
