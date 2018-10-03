@@ -155,7 +155,7 @@ namespace rocksdb {
 								ValueType type;
 								SequenceNumber existing_seq;
 								SequenceNumber target_seq;
-								UnPackSequenceAndType(tag, &target_seq, &type);
+								UnPackSequenceAndType(meta, &target_seq, &type);
 								UnPackSequenceAndType(tag, &existing_seq, &type);
 								/* Size를 비교해서 만약 덮어쓰려는 Size가 더 작으면 그대로 Overwrite */
 								/* 더 크다면 새로운 Block 할당해서 포인터 교체 */
