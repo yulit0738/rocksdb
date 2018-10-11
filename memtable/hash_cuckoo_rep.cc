@@ -24,6 +24,7 @@
 #include <condition_variable>
 #include "memtable/yul_inlineskiplist.h"
 #include "util/yul_util.h"
+#include <stack>
 
 
 using namespace moodycamel;
@@ -39,6 +40,19 @@ namespace rocksdb {
 		static const unsigned int kIndexJobUpdate = 2;
 		static const unsigned int kQueueThreshhold = 20;
 		typedef YulInlineSkipList<const MemTableRep::KeyComparator&> KeyIndex;
+
+		struct TeksFreeSpaceElem {
+			// Entry start pointer
+			char* ptr_;
+			// Entry Size
+			uint64_t size_;
+
+			TeksFreeSpaceElem() : ptr_(nullptr), size_(0) {}
+			
+			TeksFreeSpaceElem(char* ptr, uint64_t size)
+				: ptr_(ptr), size_(size) {}
+		};
+
 		struct CuckooStep {
 			static const int kNullStep = -1;
 			// the bucket id in the cuckoo array.
@@ -122,6 +136,20 @@ namespace rocksdb {
 			virtual bool Contains(const char* internal_key) const override;
 
 			virtual KeyHandle Allocate(const size_t len, char** buf) override {
+				std::unique_lock<std::mutex> lock(teks_memory_update_lock_);
+				if (TeksCheckSize(len) == true) {
+					/* Free space 에서 할당할 수 있는 요청일 경우 Free space 를 돌려준다. */
+					
+					TeksFreeSpaceElem& x = yul_free_space_.top();
+					if (x.size_ >= len) {
+						*buf = x.ptr_;
+						//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(x.ptr_)) - 1;
+						//printf("VICTIM REALLOC Height : %d",vk->UnstashHeight()); PrintKey(*buf);
+						yul_free_space_.pop();
+						return static_cast<KeyHandle>(*buf);
+					}
+				}
+				lock.unlock();
 				*buf = KeyIndex_.AllocateKey(len);
 				return static_cast<KeyHandle>(*buf);
 			}
@@ -332,6 +360,7 @@ namespace rocksdb {
 			// Mutex for background workers
 			std::mutex yul_background_worker_mutex;
 			std::mutex yul_background_worker_done_mutex;
+			std::mutex teks_memory_update_lock_;
 
 			std::atomic<size_t> yul_background_worker_todo_ops;
 			std::atomic<size_t> yul_background_worker_written_ops;
@@ -343,6 +372,9 @@ namespace rocksdb {
 			// YUIL
 			// need to support Snapshot so we prepare some tricky flag for snapshot :)
 			std::atomic<short> yul_snapshot_count;
+
+			// stack for simple free space management 
+			std::stack<TeksFreeSpaceElem> yul_free_space_;
 			// for terminating thread
 			//std::promise<void> exitSignal;
 			//std::future<void> futureObj;
@@ -466,11 +498,45 @@ namespace rocksdb {
 				//}
 
 				//std::unique_lock<std::mutex> lock(KeyIndex_.inplace_mutex_);
+				const char* t = shortcut->UnstashKey();
 				auto org = GetSequenceNum(shortcut->Key());
 				auto upd = GetSequenceNum(key);
 				if (org < upd) {
+					const char* victim_key = shortcut->Key();
+					//printf("ORIGIN KEY : "); PrintKey(shortcut->Key());
+					//KeyIndex::Node* v = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+					//printf("DUP KEY Height : %d", v->UnstashHeight()); PrintKey(key);
 					shortcut->StashKey(key);
+					if (t != nullptr) {
+						// Skiplist Node 에 속해있는 Entry 가 아닌 경우에만 Victim Key로 선정될 수 있다.
+						//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(t)) - 1;
+						//printf("VICTIM KEY Height : %d",vk->UnstashHeight()); PrintKey(t);
+						TeksFreeSpaceInsert(const_cast<char*>(victim_key));
+					}
 				}
+			}
+
+			void TeksFreeSpaceInsert(char* key) {
+				uint64_t offset = 0;
+				
+				/* key size */
+				uint32_t key_length = 0;
+				const char* key_ptr = GetVarint32Ptr(key, key + 5, &key_length);
+				/* value size */
+				Slice value = GetLengthPrefixedSlice(key_ptr + key_length);
+				uint32_t value_size = static_cast<uint32_t>(value.size());
+				/* internal Metadata size */
+				//uint32_t internal_key_size = key_length + 8;
+
+				offset = VarintLength(key_length) + key_length + VarintLength(value_size) + value_size;
+				
+				TeksFreeSpaceElem x(key, offset);
+				std::unique_lock<std::mutex> lock(teks_memory_update_lock_);
+				yul_free_space_.push(x);
+			}
+
+			bool TeksCheckSize(uint64_t len) {
+				return !yul_free_space_.empty() && yul_free_space_.top().size_ >= len;
 			}
 
 			void DoForegroundWork(const size_t& thresh) {
@@ -805,7 +871,8 @@ namespace rocksdb {
 		void HashCuckooRep::Insert(KeyHandle handle) {
 			static const float kMaxFullness = 0.90f;
 			auto* key = static_cast<char*>(handle);
-			//printf("[INSERT KEY] "); PrintKey(key);
+			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			//printf("Cuckoo Insert : %d", vk->UnstashHeight()); PrintKey(key);
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
