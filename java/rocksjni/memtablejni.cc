@@ -7,6 +7,7 @@
 
 #include "rocksjni/portal.h"
 #include "include/org_rocksdb_HashSkipListMemTableConfig.h"
+#include "include/org_rocksdb_HashCuckooMemTableConfig.h"
 #include "include/org_rocksdb_HashLinkedListMemTableConfig.h"
 #include "include/org_rocksdb_VectorMemTableConfig.h"
 #include "include/org_rocksdb_SkipListMemTableConfig.h"
@@ -28,6 +29,29 @@ jlong Java_org_rocksdb_HashSkipListMemTableConfig_newMemTableFactoryHandle(
         static_cast<int32_t>(jbranching_factor)));
   }
   rocksdb::IllegalArgumentExceptionJni::ThrowNew(env, s);
+  return 0;
+}
+
+/*
+ * Class:     org_rocksdb_HashCuckooMemTableConfig
+ * Method:    newMemTableFactoryHandle
+ * Signature: 
+ */
+jlong Java_org_rocksdb_HashCuckooMemTableConfig_newMemTableFactoryHandle(
+    JNIEnv* env, jobject /*jobj*/, jlong jwrite_buffer_size,
+    jlong javerage_data_Size, jint jhash_function_count) {
+  rocksdb::Status statusWriteBufferSize =
+      rocksdb::check_if_jlong_fits_size_t(jwrite_buffer_size);
+  rocksdb::Status statusAverageDataSize =
+      rocksdb::check_if_jlong_fits_size_t(javerage_data_Size);
+  if (statusWriteBufferSize.ok() && statusAverageDataSize.ok()) {
+    return reinterpret_cast<jlong>(rocksdb::NewHashCuckooRepFactory(
+        static_cast<size_t>(jwrite_buffer_size),
+        static_cast<size_t>(javerage_data_Size),
+        static_cast<int32_t>(jhash_function_count)));
+  }
+  rocksdb::IllegalArgumentExceptionJni::ThrowNew(
+      env, !statusWriteBufferSize.ok() ? statusWriteBufferSize : statusAverageDataSize);
   return 0;
 }
 
