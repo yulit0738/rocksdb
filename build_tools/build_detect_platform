@@ -385,7 +385,9 @@ EOF
           }
 EOF
         if [ "$?" = 0 ]; then
-            COMMON_FLAGS="$COMMON_FLAGS -DROCKSDB_MALLOC_USABLE_SIZE"
+			# YUIL - Turn off MALLOC_USABLE_SIZE
+            #COMMON_FLAGS="$COMMON_FLAGS -DROCKSDB_MALLOC_USABLE_SIZE"
+            COMMON_FLAGS="$COMMON_FLAGS"
         fi
     fi
 
