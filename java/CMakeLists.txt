@@ -94,6 +94,7 @@ set(NATIVE_JAVA_CLASSES
         org.rocksdb.FlushOptions
         org.rocksdb.HashLinkedListMemTableConfig
         org.rocksdb.HashSkipListMemTableConfig
+        org.rocksdb.HashCuckooMemTableConfig
         org.rocksdb.IngestExternalFileOptions
         org.rocksdb.Logger
         org.rocksdb.LRUCache
@@ -216,6 +217,7 @@ add_jar(
   src/main/java/org/rocksdb/Filter.java
   src/main/java/org/rocksdb/FlushOptions.java
   src/main/java/org/rocksdb/HashLinkedListMemTableConfig.java
+  src/main/java/org/rocksdb/HashCuckooMemTableConfig.java
   src/main/java/org/rocksdb/HashSkipListMemTableConfig.java
   src/main/java/org/rocksdb/HistogramData.java
   src/main/java/org/rocksdb/HistogramType.java
