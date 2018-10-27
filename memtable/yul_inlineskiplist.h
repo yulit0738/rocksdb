@@ -1,4 +1,46 @@
-#pragma  once
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
+//
+// Copyright (c) 2011 The LevelDB Authors. All rights reserved.  Use of
+// this source code is governed by a BSD-style license that can be found
+// in the LICENSE file. See the AUTHORS file for names of contributors.
+//
+// YulInlineSkipList is derived from SkipList (skiplist.h), but it optimizes
+// the memory layout by requiring that the key storage be allocated through
+// the skip list instance.  For the common case of SkipList<const char*,
+// Cmp> this saves 1 pointer per skip list node and gives better cache
+// locality, at the expense of wasted padding from using AllocateAligned
+// instead of Allocate for the keys.  The unused padding will be from
+// 0 to sizeof(void*)-1 bytes, and the space savings are sizeof(void*)
+// bytes, so despite the padding the space used is always less than
+// SkipList<const char*, ..>.
+//
+// Thread safety -------------
+//
+// Writes via Insert require external synchronization, most likely a mutex.
+// InsertConcurrently can be safely called concurrently with reads and
+// with other concurrent inserts.  Reads require a guarantee that the
+// YulInlineSkipList will not be destroyed while the read is in progress.
+// Apart from that, reads progress without any internal locking or
+// synchronization.
+//
+// Invariants:
+//
+// (1) Allocated nodes are never deleted until the YulInlineSkipList is
+// destroyed.  This is trivially guaranteed by the code since we never
+// delete any skip list nodes.
+//
+// (2) The contents of a Node except for the next/prev pointers are
+// immutable after the Node has been linked into the YulInlineSkipList.
+// Only Insert() modifies the list, and it is careful to initialize a
+// node and use release-stores to publish the nodes in one or more lists.
+//
+// ... prev vs. next pointer ordering ...
+//
+
+#pragma once
 #include <assert.h>
 #include <stdlib.h>
 #include <algorithm>
@@ -595,15 +637,43 @@ namespace rocksdb {
 			}
 		}
 		else {
-			int level = 0;
-			while (true) {
-				if (KeyIsAfterNode(key, x)) {
-					x = x->Next(level);
-				}
-				else {
-					return x;
-				}
+				int level = 0;
+				while (true) {
+					if (KeyIsAfterNode(key, x)) {
+						x = x->Next(level);
+					}
+					else {
+							return x;
+					}
 			}
+		//	int level = 0;
+		//	Node* last_bigger = nullptr;
+		//	Node* next = x;
+		//	while (true) {
+		//		if (next != nullptr) {
+		//			PREFETCH(next->Next(level), 0, 1);
+		//		}
+		//		// Make sure the lists are sorted
+		//		assert(x == head_ || next == nullptr || KeyIsAfterNode(next->Key(), x));
+		//		// Make sure we haven't overshot during our search
+		//		assert(x == head_ || KeyIsAfterNode(key, x));
+		//		int cmp = (next == nullptr || next == last_bigger)
+		//			? 1
+		//			: compare_(next->Key(), key);
+		//		if (cmp == 0 || (cmp > 0 && level == 0)) {
+		//			return next;
+		//		}
+		//		else if (cmp < 0) {
+		//			// Keep searching in this list
+		//			x = next;
+		//		}
+		//		else {
+		//			// Switch to next list, reuse compare_() result
+		//			last_bigger = next;
+		//			level--;
+		//		}
+		//		next = x->Next(level);
+		//}
 		}
 	}
 

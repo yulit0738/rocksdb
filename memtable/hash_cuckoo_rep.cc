@@ -25,6 +25,10 @@
 #include "memtable/yul_inlineskiplist.h"
 #include "util/yul_util.h"
 #include <stack>
+#ifdef TEKS_DEBUG
+#include <iostream>
+using namespace std;
+#endif
 
 
 using namespace moodycamel;
@@ -100,6 +104,22 @@ namespace rocksdb {
 				backup_table_(nullptr),
 				yul_background_worker_terminate(false),
 				yul_snapshot_count(0),
+#ifdef TEKS_DEBUG
+				teks_node_append_old_count(0),
+				teks_node_append_new_count(0),
+				teks_node_insert_count(0),
+				teks_node_inplace_count(0),
+				teks_node_foreground_update_count(0),
+				teks_node_get_count(0),
+				teks_node_get_cuckoo_hit_count(0),
+				teks_node_get_skip_hit_count(0),
+				teks_node_seek_count(0),
+				teks_node_iter_seek_shortcut_hit_count(0),
+				teks_node_iter_seek_non_hit_count(0),
+				teks_node_reusable_size(0),
+				teks_node_reused_size(0),
+				teks_node_actual_reused_size(0),
+#endif
 				// YUIL
 				KeyIndex_(compare, allocator),
 				yul_index_array_(nullptr),
@@ -116,7 +136,7 @@ namespace rocksdb {
 					cuckoo_array_[bid].store(nullptr, std::memory_order_relaxed);
 					yul_index_array_[bid].store(nullptr, std::memory_order_relaxed);
 				}
-
+				
 				cuckoo_path_ = reinterpret_cast<int*>(
 					allocator_->Allocate(sizeof(int) * (cuckoo_path_max_depth_ + 1)));
 				is_nearly_full_ = false;
@@ -127,7 +147,7 @@ namespace rocksdb {
 			}
 
 			// return false, indicating HashCuckooRep does not support merge operator.
-			virtual bool IsMergeOperatorSupported() const override { return false; }
+			virtual bool IsMergeOperatorSupported() const override { return true; }
 
 			// return false, indicating HashCuckooRep does not support snapshot.
 			virtual bool IsSnapshotSupported() const override { return true; }
@@ -146,6 +166,10 @@ namespace rocksdb {
 						//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(x.ptr_)) - 1;
 						//printf("VICTIM REALLOC Height : %d",vk->UnstashHeight()); PrintKey(*buf);
 						yul_free_space_.pop();
+#ifdef TEKS_DEBUG
+						teks_node_reused_size.fetch_add(x.size_);
+						teks_node_actual_reused_size.fetch_add(len);
+#endif
 						return static_cast<KeyHandle>(*buf);
 					}
 				}
@@ -157,7 +181,7 @@ namespace rocksdb {
 			virtual ~HashCuckooRep() override {
 				yul_background_worker_terminate.store(true, std::memory_order_release);
 				if (yul_background_worker_done) yul_background_worker_cv.notify_all();
-				for (int i = 0; i < kDefaultMaxBackgroundWorker; ++i) {
+				for (int i = 0; i < yul_background_worker.size(); ++i) {
 					yul_background_worker[i]->join();
 				}
 			}
@@ -212,9 +236,11 @@ namespace rocksdb {
 				// The returned iterator is not valid.
 				// explicit Iterator(const MemTableRep* collection);
 				virtual ~Iterator() override {
+
 					if (list_->yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
 						list_->yul_snapshot_count.fetch_sub(1, std::memory_order_relaxed);
 					}
+					//list_->PrintInternalStats();
 					delete cit_;
 				};
 
@@ -364,7 +390,22 @@ namespace rocksdb {
 
 			std::atomic<size_t> yul_background_worker_todo_ops;
 			std::atomic<size_t> yul_background_worker_written_ops;
-
+#ifdef TEKS_DEBUG
+			std::atomic<size_t> teks_node_insert_count;
+			std::atomic<size_t> teks_node_inplace_count;
+			std::atomic<size_t> teks_node_append_old_count;
+			std::atomic<size_t> teks_node_append_new_count;
+			std::atomic<size_t> teks_node_foreground_update_count;
+			std::atomic<size_t> teks_node_get_count;
+			std::atomic<size_t> teks_node_get_cuckoo_hit_count;
+			std::atomic<size_t> teks_node_get_skip_hit_count;
+			std::atomic<size_t> teks_node_seek_count;
+			std::atomic<size_t> teks_node_iter_seek_shortcut_hit_count;
+			std::atomic<size_t> teks_node_iter_seek_non_hit_count;
+			std::atomic<size_t> teks_node_reusable_size;
+			std::atomic<size_t> teks_node_reused_size;
+			std::atomic<size_t> teks_node_actual_reused_size;
+#endif
 			// YUIL
 			// boolean for Wakeup Signal
 			bool yul_background_worker_done;
@@ -434,7 +475,7 @@ namespace rocksdb {
 
 			// YUIL
 			// Index List(Persca Skiplist)에 Bucket Key와 Index 삽입
-			KeyIndex::Node* InsertIndexData(const char* internal_key);
+			KeyIndex::Node* InsertIndexData(const char* internal_key, const unsigned int bid);
 			// Index List 에 Key와 Index를 덮어쓴다. (Append 하지 않음)
 			KeyIndex::Node* InsertIndexDataOverwrite(const char* internal_key, const unsigned int bid);
 			// BackupTable 대신에 Skiplist 사용해서 바로 넣어준다.
@@ -447,7 +488,8 @@ namespace rocksdb {
 			inline void InsertJob(const IndexJob& job);
 			inline void InsertJobConcurrently(const IndexJob& job);
 			// Get() 했을때 Bucket에서 miss 나면 Indexlist에서 뒤져줌
-			const char* GetFromIndexTable(const LookupKey& key);
+			void GetFromIndexTable(const LookupKey& key, void* callback_args,
+				bool(*callback_func)(void* arg, const char* entry));
 
 			inline bool GetJob(IndexJob& job) {
 				return yul_work_queue_.try_dequeue(job);
@@ -507,6 +549,9 @@ namespace rocksdb {
 					//KeyIndex::Node* v = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
 					//printf("DUP KEY Height : %d", v->UnstashHeight()); PrintKey(key);
 					shortcut->StashKey(key);
+#ifdef TEKS_DEBUG
+					teks_node_foreground_update_count.fetch_add(1);
+#endif
 					if (t != nullptr) {
 						// Skiplist Node 에 속해있는 Entry 가 아닌 경우에만 Victim Key로 선정될 수 있다.
 						//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(t)) - 1;
@@ -531,6 +576,9 @@ namespace rocksdb {
 				offset = VarintLength(key_length) + key_length + VarintLength(value_size) + value_size;
 				
 				TeksFreeSpaceElem x(key, offset);
+#ifdef TEKS_DEBUG
+				teks_node_reusable_size.fetch_add(offset);
+#endif
 				std::unique_lock<std::mutex> lock(teks_memory_update_lock_);
 				yul_free_space_.push(x);
 			}
@@ -538,7 +586,26 @@ namespace rocksdb {
 			bool TeksCheckSize(uint64_t len) {
 				return !yul_free_space_.empty() && yul_free_space_.top().size_ >= len;
 			}
-
+#ifdef TEKS_DEBUG
+			void PrintInternalStats() {
+				printf("============== Internal Stats ============== \n");
+				printf("Total Write Operation count : %lld\n", occupied_count_.load());
+				printf("[WRITE] Skiplist Insert count (no reader+background) : %lld\n", teks_node_insert_count.load());
+				printf("[WRITE] Inplace count (no reader+background) : %lld\n", teks_node_inplace_count.load());
+				printf("[WRITE] Append Old count (reader + background) : %lld\n", teks_node_append_old_count.load());
+				printf("[WRITE] Append New count (reader + background) : %lld\n", teks_node_append_new_count.load());
+				printf("Foreground update count (no reader + foreground): %lld\n", teks_node_foreground_update_count.load());
+				printf("Total Get Operation Count : %lld\n", teks_node_get_count.load());
+				printf("[GET] Cuckoo Hit (latest read) : %lld\n", teks_node_get_cuckoo_hit_count.load());
+				printf("[GET] Skiplist Hit (maybe snapshot or older timestamp) : %lld\n", teks_node_get_skip_hit_count.load());
+				printf("Total Iterator::Seek Opration Count : %lld\n", teks_node_seek_count.load());
+				printf("[SEEK] Shortcut Hit : %lld\n", teks_node_iter_seek_shortcut_hit_count.load());
+				printf("[SEEK] Skiplist Hit (can't get shortcut) : %lld\n", teks_node_iter_seek_non_hit_count.load());
+				printf("[MEM] Reusable Size (recyclable) : %lld\n", teks_node_reusable_size.load());
+				printf("[MEM] Reused Size (recycled): %lld\n", teks_node_reused_size.load());
+				printf("[MEM] Acutal Reused Size (actual recycled) : %lld\n", teks_node_actual_reused_size.load());
+			}
+#endif
 			void DoForegroundWork(const size_t& thresh) {
 				HashCuckooRep::IndexJob job;
 				bool done = false;
@@ -556,7 +623,7 @@ namespace rocksdb {
 						if (snap_count >= 1) {
 							// Snapshot 켜졌으면 Append 방식으로 작동
 							if (job.Type == kIndexJobBucket || kIndexJobCollisionModification) {
-								index = InsertIndexData(key);
+								index = InsertIndexData(key, bid);
 							}
 						}
 						else if (snap_count == 0) {
@@ -606,6 +673,7 @@ namespace rocksdb {
 						}
 					}
 					yul_background_worker_written_ops.fetch_add(ops_complete, std::memory_order_relaxed);
+					//PrintInternalStats();
 					if (done) {
 						break;
 					}
@@ -617,7 +685,6 @@ namespace rocksdb {
 				Slice akey = GetLengthPrefixedSlice(internal_key);
 				const uint64_t anum = DecodeFixed64(akey.data() + akey.size() - 8) >> 8;
 				return anum;
-
 			}
 
 			// Returns the pointer to the internal iterator to the buckets where buckets
@@ -625,10 +692,10 @@ namespace rocksdb {
 			// any insert after this function call may affect the sorted nature of
 			// the returned iterator.
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
-				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+				//if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
 					//매번 Add하게 하면 느려짐
 					yul_snapshot_count.fetch_add(1, std::memory_order_release);
-				}
+				//}
 
 				auto todo = yul_background_worker_todo_ops.load(std::memory_order_relaxed);
 				auto ops = yul_background_worker_written_ops.load(std::memory_order_relaxed);
@@ -693,20 +760,36 @@ namespace rocksdb {
 				}
 			}
 		};
-		const char* HashCuckooRep::GetFromIndexTable(const LookupKey& k) {
+		void HashCuckooRep::GetFromIndexTable(const LookupKey& k, void* callback_args,
+			bool(*callback_func)(void* arg, const char* entry)) {
+#ifdef TEKS_DEBUG
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckoo::" << __FUNCTION__ << endl;
+			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			PrintKey(k.memtable_key().data());
+#endif
+			teks_node_get_skip_hit_count.fetch_add(1);
+#endif
 			auto iter = GetIterator(nullptr);
-			iter->Seek(Slice(), k.memtable_key().data());
-			if (iter->Valid()) {
-				auto key = iter->key();
-				delete iter;
-				return key;
+			Slice dummy_slice;
+			for (iter->Seek(dummy_slice, k.memtable_key().data());
+				iter->Valid() && callback_func(callback_args, iter->key());
+				iter->Next()) {
 			}
-			return nullptr;
+			delete iter;
 		}
 
 		void HashCuckooRep::Get(const LookupKey& key, void* callback_args,
 			bool(*callback_func)(void* arg, const char* entry)) {
 			Slice user_key = key.user_key();
+#ifdef TEKS_DEBUG
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckoo::" << __FUNCTION__ << endl;
+			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			PrintKey(key.memtable_key().data());
+#endif
+			teks_node_get_count.fetch_add(1);
+#endif
 			for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
 				const char* bucket =
 					cuckoo_array_[GetHash(user_key, hid)].load(std::memory_order_acquire);
@@ -718,21 +801,19 @@ namespace rocksdb {
 						if (yul_snapshot_count.load(std::memory_order_acquire) == 0 || compare_(bucket, mem_key) >= 0) {
 							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
 							callback_func(callback_args, bucket);
+#ifdef TEKS_DEBUG
 							//printf("[GETTTT] Hit Cuckoo : "); PrintKey(bucket);
+							teks_node_get_cuckoo_hit_count.fetch_add(1);
+#endif
 							return;
 						}
 						else if (yul_snapshot_count.load(std::memory_order_acquire) > 0) {
 							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
-							bucket = GetFromIndexTable(key);
-							if (bucket != nullptr) {
-								callback_func(callback_args, bucket);
-								//printf("[GETTTT] Hit Skiplist : "); PrintKey(bucket);
-								return;
-							}
-							break;
+							GetFromIndexTable(key, callback_args, callback_func);
+							return;
 						}
-					}
-				}
+			}
+		}
 				else {
 					// as Put() always stores at the vacant bucket located by the
 					// hash function with the smallest possible id, when we first
@@ -749,6 +830,52 @@ namespace rocksdb {
 				backup_table->Get(key, callback_args, callback_func);
 			}
 		}
+//		void HashCuckooRep::Get(const LookupKey& key, void* callback_args,
+//			bool(*callback_func)(void* arg, const char* entry)) {
+//			Slice user_key = key.user_key();
+//			Slice internal_key = key.internal_key();
+//#ifdef TEKS_DEBUG
+//			cout << "HashCuckoo::" << __FUNCTION__ << endl;
+//			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+//			PrintKey(key.memtable_key().data());
+//#endif
+//			//GetFromIndexTable(key, callback_args, callback_func);
+//			for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
+//				const char* bucket =
+//					cuckoo_array_[GetHash(user_key, hid)].load(std::memory_order_acquire);
+//				if (bucket != nullptr) {
+//					Slice bucket_user_key = UserKey(bucket);
+//					if (bucket_user_key==user_key) {
+//						const uint64_t bucket_seq = GetSequenceNum(bucket);
+//						const uint64_t userkey_seq = DecodeFixed64(internal_key.data() + internal_key.size() - 8) >> 8;
+//						if (bucket_seq <= userkey_seq) {
+//							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
+//							callback_func(callback_args, bucket);
+//							return;
+//						}
+//						else {
+//							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
+//							GetFromIndexTable(key, callback_args, callback_func);
+//							break;
+//						}
+//					}
+//				}
+//				else {
+//					// as Put() always stores at the vacant bucket located by the
+//					// hash function with the smallest possible id, when we first
+//					// find a vacant bucket in Get(), that means a miss.
+//					break;
+//				}
+//			}
+//
+//
+//			MemTableRep* backup_table = backup_table_.get();
+//			if (backup_table != nullptr) {
+//				// 백업테이블은 애초에 Append 방식이라서 유지 잘되어있음.
+//				// Get에서는 Cuckoo 해시에서만 분기시켜주자.
+//				backup_table->Get(key, callback_args, callback_func);
+//			}
+//		}
 
 
 		inline void HashCuckooRep::InsertJob(const IndexJob& job) {
@@ -782,7 +909,11 @@ namespace rocksdb {
 
 		CUCKOOCOLLISIONMOD:
 			auto* key = static_cast<char*>(handle);
-			//printf("[CONCURRENT INSERT KEY] "); PrintKey(key);
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckoo::" << __FUNCTION__ << endl;
+			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			if (key != nullptr) PrintKey(key);
+#endif
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
@@ -871,8 +1002,11 @@ namespace rocksdb {
 		void HashCuckooRep::Insert(KeyHandle handle) {
 			static const float kMaxFullness = 0.90f;
 			auto* key = static_cast<char*>(handle);
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckoo::" << __FUNCTION__ << endl;
 			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
-			//printf("Cuckoo Insert : %d", vk->UnstashHeight()); PrintKey(key);
+			if (key!=nullptr) PrintKey(key);
+#endif
 			int initial_hash_id = 0;
 			size_t cuckoo_path_length = 0;
 			auto user_key = UserKey(key);
@@ -959,13 +1093,30 @@ namespace rocksdb {
 			return false;
 		}
 
-		inline KeyIndex::Node* HashCuckooRep::InsertIndexData(const char* internal_key) {
+		inline KeyIndex::Node* HashCuckooRep::InsertIndexData(const char* internal_key, const unsigned int bid) {
+#ifdef TEKS_DEBUG
+			KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
+			if (hint != nullptr) {
+				teks_node_append_old_count.fetch_add(1);
+			}
+			else if (hint == nullptr) {
+				teks_node_append_new_count.fetch_add(1);
+			}
+#endif
 			return KeyIndex_.InsertConcurrently(internal_key);
 		}
 
 		inline KeyIndex::Node* HashCuckooRep::InsertIndexDataOverwrite(const char* internal_key, const unsigned int bid) {
-			//return KeyIndex_.InsertConcurrently(internal_key);
-			return KeyIndex_.UpdateNode(internal_key, yul_index_array_[bid].load(std::memory_order_acquire));
+			KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
+#ifdef TEKS_DEBUG
+			if (hint != nullptr) {
+				teks_node_inplace_count.fetch_add(1);
+			}
+			else if(hint == nullptr) {
+				teks_node_insert_count.fetch_add(1);
+			}
+#endif
+			return KeyIndex_.UpdateNode(internal_key, hint);
 			//return KeyIndex_.InsertIndex(internal_key, bucket_id);
 		}
 
@@ -1355,55 +1506,11 @@ namespace rocksdb {
 		// REQUIRES: Valid()
 		void HashCuckooRep::Iterator::Next() {
 			assert(Valid());
-#if 0
-			if (list_->have_arena || !list_->is_there_dupliacated_key) {
-				cit_->Next();
-			}
-			else if (cit_->Valid() && list_->is_there_dupliacated_key) {
-				Slice obj = GetLengthPrefixedSlice(cit_->key());
-				Slice ukey = Slice(obj.data(), obj.size() - 8);
-				KeyIndex::Node* sp = nullptr;
-				for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
-					auto HashId = list_->GetHash(ukey, hid);
-					const char* bucket =
-						cuckoo_array_[HashId].load(std::memory_order_acquire);
-					if (bucket != nullptr) {
-						Slice bucket_user_key = list_->UserKey(bucket);
-						if (ukey == bucket_user_key) {
-							sp = list_->yul_index_skip_array_[HashId].load(std::memory_order_acquire);
-							break;
-						}
-					}
-				}
-				if (sp != nullptr) {
-					cit_->SetNode(sp);
-				}
-				cit_->Next();
-			}
-#endif
-			//printf("dup : %zd | ocup : %zd | %f\n", list_->dup_count_, list_->occupied_count_.load(std::memory_order_relaxed),
-			//	static_cast<double>(list_->dup_count_ / list_->occupied_count_.load(std::memory_order_relaxed)));
-			//if (list_->is_there_dupliacated_key) {
-			//	Slice obj = GetLengthPrefixedSlice(cit_->key());
-			//	Slice ukey = Slice(obj.data(), obj.size() - 8);
-			//	KeyIndex::Node* sp = nullptr;
-			//	for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
-			//		auto HashId = list_->GetHash(ukey, hid);
-			//		const char* bucket =
-			//			cuckoo_array_[HashId].load(std::memory_order_acquire);
-			//		if (bucket != nullptr) {
-			//			Slice bucket_user_key = list_->UserKey(bucket);
-			//			if (ukey == bucket_user_key) {
-			//				sp = list_->yul_index_skip_array_[HashId].load(std::memory_order_acquire);
-			//				break;
-			//			}
-			//		}
-			//	}
-			//	if (sp != nullptr && cit_->isNodeEqual(sp)) {
-			//		cit_->SetNode(sp);
-			//	}
-			//}
 			cit_->Next();
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckooIterator::" << __FUNCTION__ << endl;
+			if (Valid()) PrintKey(key());
+#endif
 		}
 
 		// Advances to the previous position.
@@ -1411,14 +1518,15 @@ namespace rocksdb {
 		void HashCuckooRep::Iterator::Prev() {
 			assert(Valid());
 			cit_->Prev();
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckooIterator::" << __FUNCTION__ << endl;
+			if (Valid()) PrintKey(key());
+#endif
 		}
 
 		// Advance to the first entry with a key >= target
 		void HashCuckooRep::Iterator::Seek(const Slice& user_key,
 			const char* memtable_key) {
-			//const char* encoded_key =
-			//      (memtable_key != nullptr) ? memtable_key : EncodeKey(&tmp_, user_key);
-			//cit_->Seek(encoded_key);
 			Slice ukey;
 			static int count = 0;
 			const char* encoded_key =
@@ -1435,6 +1543,13 @@ namespace rocksdb {
 			else {
 				ukey = Slice(user_key.data(), user_key.size() - 8);
 			}
+#ifdef TEKS_DEBUG
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckooIterator::" << __FUNCTION__ << endl;
+			PrintKey(encoded_key);
+#endif
+			list_->teks_node_seek_count.fetch_add(1);
+#endif
 			for (unsigned int hid = 0; hid < list_->hash_function_count_; ++hid) {
 				auto HashId = list_->GetHash(ukey, hid);
 				const char* bucket =
@@ -1445,49 +1560,24 @@ namespace rocksdb {
 						auto hint = list_->yul_index_array_[HashId].load(std::memory_order_acquire);
 						if (hint != nullptr) {
 							cit_->Seek(encoded_key, hint);
-
 						}
 						else {
-							//printf("Hint Can not seek : %d / TODO : %zd / WRITEEN : %zd / bucket_count : %zd\n", ++count, list_->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
-							//      list_->yul_background_worker_written_ops.load(std::memory_order_relaxed), list_->bucket_count_);
-							//printf("Target KEY : "); PrintKey(encoded_key);
-							//printf("Bucket : "); PrintKey(bucket);
-							//if (hint != nullptr) { printf("Hint Found : "); PrintKey(hint->key); }
-							//else { printf("Hint Not Found!!\n"); }
-							//cit_->Seek(encoded_key);
-							//if (cit_->Valid()) {
-							//      printf("Seek found : "); PrintKey(cit_->key());
-							//}
-							//else { printf("Seek Not Found!!\n"); }
-							//
-							//printf("\n");
 							cit_->Invalidate();
 						}
-						//printf("[BACKEND SEEK]n");
-						//printf("Target KEY : "); PrintKey(encoded_key);
-						//printf("Bucket : "); PrintKey(bucket);
-						//if (hint != nullptr) { printf("Hint Found : "); PrintKey(hint->key); }
-						//else { printf("Hint Not Found!!\n"); }
-						//if (cit_->Valid()) {
-						//      printf("Seek found : "); PrintKey(cit_->key());
-						//}
-						//else { printf("Seek Not Found!!\n"); }
-						//
-						//printf("\n");
 						return;
 					}
 				}
 			}
-			// Cuckoo 해시에 없으면 Backuptable도 뒤져야함. 없는 Key에 대한 검색이 올경우 어떻게 해야되지?
-			// Cuckoo 해시 밖이라서 Shortcut 접근은 불가능.
-			// 일단 별수 없다. Backuptable 이 있는지 검사하고 Skiplist를 전부 뒤지는 수밖에..
+#ifdef TEKS_DEBUG
+			list_->teks_node_iter_seek_non_hit_count.fetch_add(1);
+#endif
 			if (list_->backup_table_.get() != nullptr) {
 				cit_->Seek(encoded_key);
 				return;
 			}
-			// 못찾으면 유효하지 않음
-			//printf("Can not seek : %d\n", ++count);
-			cit_->Invalidate();
+
+			cit_->Seek(encoded_key);
+			//cit_->Invalidate();
 		}
 
 		// Retreat to the last entry with a key <= target
@@ -1501,12 +1591,20 @@ namespace rocksdb {
 		// Final state of iterator is Valid() iff collection is not empty.
 		void HashCuckooRep::Iterator::SeekToFirst() {
 			cit_->SeekToFirst();
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckooIterator::" << __FUNCTION__ << endl;
+			if (Valid()) PrintKey(key());
+#endif
 		}
 
 		// Position at the last entry in collection.
 		// Final state of iterator is Valid() iff collection is not empty.
 		void HashCuckooRep::Iterator::SeekToLast() {
 			cit_->SeekToLast();
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckooIterator::" << __FUNCTION__ << endl;
+			if (Valid()) PrintKey(key());
+#endif
 		}
 #else
 		HashCuckooRep::Iterator::Iterator(
@@ -1647,7 +1745,7 @@ namespace rocksdb {
 					if (snap_count >= 1) {
 						// Snapshot 켜졌으면 Append 방식으로 작동
 						if (job.Type == kIndexJobBucket || kIndexJobCollisionModification) {
-							index = cuckoo->InsertIndexData(key);
+							index = cuckoo->InsertIndexData(key, bid);
 						}
 					}
 					else if (snap_count == 0) {
@@ -1696,96 +1794,24 @@ namespace rocksdb {
 			}
 
 			cuckoo->yul_background_worker_written_ops.fetch_add(ops_complete, std::memory_order_relaxed);
+			//cuckoo->PrintInternalStats();
 		}
 	}
-
-	//void BackgroundWorker(HashCuckooRep* cuckoo)
-	//{
-	//      std::unique_lock<std::mutex> lock(cuckoo->yul_background_worker_mutex);
-	//      while (true) {
-	//              auto queuesize = cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed)
-	//                      - cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed);
-	//              if (cuckoo->yul_background_worker_terminate) {
-	//                      cuckoo->yul_background_worker_done = true;
-	//                      //cuckoo->yul_background_worker_done_cv.notify_all();
-	//                      break;
-	//              }
-
-	//              if (queuesize == 0) {
-	//                      /*printf("TODO OPS : %zu WRITTEN OPS : %zu \n",
-	//                      cuckoo->yul_background_worker_todo_ops.load(std::memory_order_relaxed),
-	//                      cuckoo->yul_background_worker_written_ops.load(std::memory_order_relaxed));*/
-	//                      cuckoo->yul_background_worker_done = true;
-	//                      cuckoo->yul_background_worker_done_cv.notify_all();
-	//                      cuckoo->yul_background_worker_cv.wait(lock);
-	//                      cuckoo->yul_background_worker_done = false;
-	//              }
-
-	//              //size_t queuesize = cuckoo->GetWorkQueueSize();
-	//              HashCuckooRep::IndexJob jobs[100];
-	//              if (queuesize > 100) queuesize = 100;
-	//              size_t jobsize = cuckoo->yul_work_queue_.try_dequeue_bulk(jobs, queuesize);
-
-	//              // Sorting jobs.
-	//              if (jobsize >= 1) {
-	//                      for (size_t i = 0; i < jobsize; ++i) {
-	//                              //printf("Fore : "); PrintKey(jobs[i].indexkey);
-	//                              const HashCuckooRep::IndexJob& job = jobs[i];
-	//                              auto key = job.IndexKey();
-	//                              unsigned int bid = job.BucketId();
-	//                              KeyIndex::Node* index = nullptr;
-	//                              auto snap_count = cuckoo->yul_snapshot_count.load(std::memory_order_relaxed);
-	//                              if (snap_count >= 1) {
-	//                                      // Snapshot 켜졌으면 Append 방식으로 작동
-	//                                      if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-	//                                              index = cuckoo->InsertIndexData(key, bid);
-	//                                      }
-	//                                      else if (job.Type == kIndexJobUpdate) {
-	//                                              index = cuckoo->InsertIndexDataUpdate(key, bid);
-	//                                      }
-	//                              }
-	//                              else if (snap_count == 0) {
-	//                                      // Snapshot 꺼지면 Overwrite모드로 작동
-	//                                      if (job.Type == kIndexJobBucket || job.Type == kIndexJobBackup) {
-	//                                              index = cuckoo->InsertIndexDataOverwrite(key, bid);
-	//                                      }
-	//                                      else if (job.Type == kIndexJobUpdate) {
-	//                                              index = cuckoo->InsertIndexDataUpdate(key, bid);
-	//                                      }
-	//                              }
-	//                              // Index array update
-	//                              if (index != nullptr) {
-	//                                      KeyIndex::Node* hint = cuckoo->yul_index_array_[bid];
-	//                                      if (hint != nullptr) {
-	//                                              uint64_t hkey = HashCuckooRep::GetSequenceNum(hint->key);
-	//                                              uint64_t ikey = HashCuckooRep::GetSequenceNum(key);
-	//                                              if (hkey < ikey) {
-	//                                                      cuckoo->yul_index_array_[bid] = index;
-	//                                              }
-	//                                      }
-	//                                      else {
-	//                                              cuckoo->yul_index_array_[bid] = index;
-	//                                      }
-	//                                      //printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-	//                                      //cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
-	//                              }
-	//                      }
-	//                      cuckoo->yul_background_worker_written_ops.fetch_add(jobsize, std::memory_order_relaxed);
-	//              }
-	//      }
-	//}
-
+#ifdef TEKS_DEBUG
 	void BackgroundWorkerCaller(HashCuckooRep* cuckoo)
 	{
 		while (true) {
 			// 2 초마다 깨워준다.
-			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			if (cuckoo->yul_background_worker_done) {
-				cuckoo->yul_background_worker_done_cv.notify_all();
-				cuckoo->yul_background_worker_cv.notify_all();
+			std::this_thread::sleep_for(std::chrono::milliseconds(500000));
+			cuckoo->PrintInternalStats();
+			if (cuckoo->yul_background_worker_terminate.load(std::memory_order_acquire)) {
+				cuckoo->yul_background_worker_done = true;
+				//cuckoo->yul_background_worker_done_cv.notify_all();
+				return;
 			}
 		}
 	}
+#endif
 
 	inline void PrintKey(const char* ikey)
 	{
@@ -1828,8 +1854,10 @@ namespace rocksdb {
 		);
 		for (int i = 0; i < c->kDefaultMaxBackgroundWorker; ++i) {
 			c->yul_background_worker.push_back(new std::thread(BackgroundWorker, c));
-			//new std::thread(BackgroundWorkerCaller, c);
 		}
+#ifdef TEKS_DEBUG
+		c->yul_background_worker.push_back(new std::thread(BackgroundWorkerCaller, c));
+#endif
 
 		return c;
 	}
