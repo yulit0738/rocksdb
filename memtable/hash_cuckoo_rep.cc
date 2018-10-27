@@ -1,4 +1,7 @@
 // This is Teks_Shortcut_ConcurrentSkiplist_inplaceupdate Version
+#define TEKS_FREESPACE 1
+//#define TEKS_DEBUG 1
+//#define TEKS_DEBUG_OPERATION 1
 #ifndef YUIL
 #ifndef ROCKSDB_LITE
 #include "memtable/hash_cuckoo_rep.h"
@@ -25,6 +28,7 @@
 #include "memtable/yul_inlineskiplist.h"
 #include "util/yul_util.h"
 #include <stack>
+
 #ifdef TEKS_DEBUG
 #include <iostream>
 using namespace std;
@@ -44,7 +48,7 @@ namespace rocksdb {
 		static const unsigned int kIndexJobUpdate = 2;
 		static const unsigned int kQueueThreshhold = 20;
 		typedef YulInlineSkipList<const MemTableRep::KeyComparator&> KeyIndex;
-
+#ifdef TEKS_FREESPACE
 		struct TeksFreeSpaceElem {
 			// Entry start pointer
 			char* ptr_;
@@ -56,6 +60,7 @@ namespace rocksdb {
 			TeksFreeSpaceElem(char* ptr, uint64_t size)
 				: ptr_(ptr), size_(size) {}
 		};
+#endif
 
 		struct CuckooStep {
 			static const int kNullStep = -1;
@@ -156,24 +161,26 @@ namespace rocksdb {
 			virtual bool Contains(const char* internal_key) const override;
 
 			virtual KeyHandle Allocate(const size_t len, char** buf) override {
-				std::unique_lock<std::mutex> lock(teks_memory_update_lock_);
-				if (TeksCheckSize(len) == true) {
-					/* Free space 에서 할당할 수 있는 요청일 경우 Free space 를 돌려준다. */
-					
-					TeksFreeSpaceElem& x = yul_free_space_.top();
-					if (x.size_ >= len) {
-						*buf = x.ptr_;
-						//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(x.ptr_)) - 1;
-						//printf("VICTIM REALLOC Height : %d",vk->UnstashHeight()); PrintKey(*buf);
-						yul_free_space_.pop();
+#ifdef TEKS_FREESPACE
+				/* Free space 에서 할당할 수 있는 요청일 경우 Free space 를 돌려준다. */
+				TeksFreeSpaceElem x;
+				while(yul_free_space_.try_dequeue(x));
+				if (x.size_ > 0 && x.size_ >= len) {
+					*buf = x.ptr_;
+					//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(x.ptr_)) - 1;
+					//printf("VICTIM REALLOC Height : %d",vk->UnstashHeight()); PrintKey(*buf);
 #ifdef TEKS_DEBUG
-						teks_node_reused_size.fetch_add(x.size_);
-						teks_node_actual_reused_size.fetch_add(len);
+					teks_node_reused_size.fetch_add(x.size_);
+					teks_node_actual_reused_size.fetch_add(len);
 #endif
-						return static_cast<KeyHandle>(*buf);
-					}
+					return static_cast<KeyHandle>(*buf);
 				}
-				lock.unlock();
+				else if (x.size_!=0){
+					// Can not use this free space
+					yul_free_space_.enqueue(x);
+				}
+#endif
+
 				*buf = KeyIndex_.AllocateKey(len);
 				return static_cast<KeyHandle>(*buf);
 			}
@@ -386,8 +393,7 @@ namespace rocksdb {
 			// Mutex for background workers
 			std::mutex yul_background_worker_mutex;
 			std::mutex yul_background_worker_done_mutex;
-			std::mutex teks_memory_update_lock_;
-
+			
 			std::atomic<size_t> yul_background_worker_todo_ops;
 			std::atomic<size_t> yul_background_worker_written_ops;
 #ifdef TEKS_DEBUG
@@ -415,7 +421,9 @@ namespace rocksdb {
 			std::atomic<short> yul_snapshot_count;
 
 			// stack for simple free space management 
-			std::stack<TeksFreeSpaceElem> yul_free_space_;
+#ifdef TEKS_FREESPACE
+			ConcurrentQueue<TeksFreeSpaceElem> yul_free_space_;
+#endif
 			// for terminating thread
 			//std::promise<void> exitSignal;
 			//std::future<void> futureObj;
@@ -574,18 +582,17 @@ namespace rocksdb {
 				//uint32_t internal_key_size = key_length + 8;
 
 				offset = VarintLength(key_length) + key_length + VarintLength(value_size) + value_size;
-				
+#ifdef TEKS_FREESPACE
 				TeksFreeSpaceElem x(key, offset);
+				yul_free_space_.enqueue(x);
+#endif
 #ifdef TEKS_DEBUG
 				teks_node_reusable_size.fetch_add(offset);
 #endif
-				std::unique_lock<std::mutex> lock(teks_memory_update_lock_);
-				yul_free_space_.push(x);
+
 			}
 
-			bool TeksCheckSize(uint64_t len) {
-				return !yul_free_space_.empty() && yul_free_space_.top().size_ >= len;
-			}
+
 #ifdef TEKS_DEBUG
 			void PrintInternalStats() {
 				printf("============== Internal Stats ============== \n");
@@ -601,9 +608,11 @@ namespace rocksdb {
 				printf("Total Iterator::Seek Opration Count : %lld\n", teks_node_seek_count.load());
 				printf("[SEEK] Shortcut Hit : %lld\n", teks_node_iter_seek_shortcut_hit_count.load());
 				printf("[SEEK] Skiplist Hit (can't get shortcut) : %lld\n", teks_node_iter_seek_non_hit_count.load());
+#ifdef TEKS_FREESPACE
 				printf("[MEM] Reusable Size (recyclable) : %lld\n", teks_node_reusable_size.load());
 				printf("[MEM] Reused Size (recycled): %lld\n", teks_node_reused_size.load());
 				printf("[MEM] Acutal Reused Size (actual recycled) : %lld\n", teks_node_actual_reused_size.load());
+#endif
 			}
 #endif
 			void DoForegroundWork(const size_t& thresh) {
@@ -1802,7 +1811,7 @@ namespace rocksdb {
 	{
 		while (true) {
 			// 2 초마다 깨워준다.
-			std::this_thread::sleep_for(std::chrono::milliseconds(500000));
+			std::this_thread::sleep_for(std::chrono::milliseconds(5000));
 			cuckoo->PrintInternalStats();
 			if (cuckoo->yul_background_worker_terminate.load(std::memory_order_acquire)) {
 				cuckoo->yul_background_worker_done = true;
