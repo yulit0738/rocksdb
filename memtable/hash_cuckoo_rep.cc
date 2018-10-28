@@ -118,8 +118,11 @@ namespace rocksdb {
 				teks_node_get_count(0),
 				teks_node_get_cuckoo_hit_count(0),
 				teks_node_get_skip_hit_count(0),
+				teks_node_get_backup_hit_count(0),
+				teks_node_get_miss_count(0),
 				teks_node_seek_count(0),
 				teks_node_iter_seek_shortcut_hit_count(0),
+				teks_node_iter_seek_shortcut_miss_count(0),
 				teks_node_iter_seek_non_hit_count(0),
 				teks_node_reusable_size(0),
 				teks_node_reused_size(0),
@@ -405,8 +408,11 @@ namespace rocksdb {
 			std::atomic<size_t> teks_node_get_count;
 			std::atomic<size_t> teks_node_get_cuckoo_hit_count;
 			std::atomic<size_t> teks_node_get_skip_hit_count;
+			std::atomic<size_t> teks_node_get_backup_hit_count;
+			std::atomic<size_t> teks_node_get_miss_count;
 			std::atomic<size_t> teks_node_seek_count;
 			std::atomic<size_t> teks_node_iter_seek_shortcut_hit_count;
+			std::atomic<size_t> teks_node_iter_seek_shortcut_miss_count;
 			std::atomic<size_t> teks_node_iter_seek_non_hit_count;
 			std::atomic<size_t> teks_node_reusable_size;
 			std::atomic<size_t> teks_node_reused_size;
@@ -596,22 +602,25 @@ namespace rocksdb {
 #ifdef TEKS_DEBUG
 			void PrintInternalStats() {
 				printf("============== Internal Stats ============== \n");
-				printf("Total Write Operation count : %lld\n", occupied_count_.load());
-				printf("[WRITE] Skiplist Insert count (no reader+background) : %lld\n", teks_node_insert_count.load());
-				printf("[WRITE] Inplace count (no reader+background) : %lld\n", teks_node_inplace_count.load());
-				printf("[WRITE] Append Old count (reader + background) : %lld\n", teks_node_append_old_count.load());
-				printf("[WRITE] Append New count (reader + background) : %lld\n", teks_node_append_new_count.load());
-				printf("Foreground update count (no reader + foreground): %lld\n", teks_node_foreground_update_count.load());
-				printf("Total Get Operation Count : %lld\n", teks_node_get_count.load());
-				printf("[GET] Cuckoo Hit (latest read) : %lld\n", teks_node_get_cuckoo_hit_count.load());
-				printf("[GET] Skiplist Hit (maybe snapshot or older timestamp) : %lld\n", teks_node_get_skip_hit_count.load());
-				printf("Total Iterator::Seek Opration Count : %lld\n", teks_node_seek_count.load());
-				printf("[SEEK] Shortcut Hit : %lld\n", teks_node_iter_seek_shortcut_hit_count.load());
-				printf("[SEEK] Skiplist Hit (can't get shortcut) : %lld\n", teks_node_iter_seek_non_hit_count.load());
+				printf("Total Write Operation count : %zu\n", occupied_count_.load());
+				printf("[WRITE] Skiplist Insert count (no reader+background) : %zu\n", teks_node_insert_count.load());
+				printf("[WRITE] Inplace count (no reader+background) : %zu\n", teks_node_inplace_count.load());
+				printf("[WRITE] Append Old count (reader + background) : %zu\n", teks_node_append_old_count.load());
+				printf("[WRITE] Append New count (reader + background) : %zu\n", teks_node_append_new_count.load());
+				printf("Foreground update count (no reader + foreground): %zu\n", teks_node_foreground_update_count.load());
+				printf("Total Get Operation Count : %zu\n", teks_node_get_count.load());
+				printf("[GET] Cuckoo Hit (latest read) : %zu\n", teks_node_get_cuckoo_hit_count.load());
+				printf("[GET] Skiplist Hit (maybe snapshot or older timestamp) : %zu\n", teks_node_get_skip_hit_count.load());
+				printf("[GET] Backuptable Hit (maybe snapshot or older timestamp) : %zu\n", teks_node_get_backup_hit_count.load());
+				printf("[GET] Can not found : %zu\n", teks_node_get_miss_count.load());
+				printf("Total Iterator::Seek Opration Count : %zu\n", teks_node_seek_count.load());
+				printf("[SEEK] Shortcut Hit : %zu\n", teks_node_iter_seek_shortcut_hit_count.load());
+				printf("[SEEK] Shortcut Miss : %zu\n", teks_node_iter_seek_shortcut_miss_count.load());
+				printf("[SEEK] Skiplist Hit (can't get shortcut) : %zu\n", teks_node_iter_seek_non_hit_count.load());
 #ifdef TEKS_FREESPACE
-				printf("[MEM] Reusable Size (recyclable) : %lld\n", teks_node_reusable_size.load());
-				printf("[MEM] Reused Size (recycled): %lld\n", teks_node_reused_size.load());
-				printf("[MEM] Acutal Reused Size (actual recycled) : %lld\n", teks_node_actual_reused_size.load());
+				printf("[MEM] Reusable Size (recyclable) : %zu\n", teks_node_reusable_size.load());
+				printf("[MEM] Reused Size (recycled): %zu\n", teks_node_reused_size.load());
+				printf("[MEM] Acutal Reused Size (actual recycled) : %zu\n", teks_node_actual_reused_size.load());
 #endif
 			}
 #endif
@@ -701,10 +710,10 @@ namespace rocksdb {
 			// any insert after this function call may affect the sorted nature of
 			// the returned iterator.
 			virtual MemTableRep::Iterator* GetIterator(Arena* arena) override {
-				//if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+				if (yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
 					//매번 Add하게 하면 느려짐
 					yul_snapshot_count.fetch_add(1, std::memory_order_release);
-				//}
+				}
 
 				auto todo = yul_background_worker_todo_ops.load(std::memory_order_relaxed);
 				auto ops = yul_background_worker_written_ops.load(std::memory_order_relaxed);
@@ -836,56 +845,20 @@ namespace rocksdb {
 			if (backup_table != nullptr) {
 				// 백업테이블은 애초에 Append 방식이라서 유지 잘되어있음.
 				// Get에서는 Cuckoo 해시에서만 분기시켜주자.
+#ifdef TEKS_DEBUG
+				teks_node_get_backup_hit_count.fetch_add(1);
+#endif
 				backup_table->Get(key, callback_args, callback_func);
 			}
+#ifdef TEKS_DEBUG_OPERATION
+			cout << "HashCuckoo::" << __FUNCTION__ << "Failed to Get!!!!!" << endl;
+			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
+			PrintKey(key.memtable_key().data());
+#endif
+#ifdef TEKS_DEBUG
+			teks_node_get_miss_count.fetch_add(1);
+#endif
 		}
-//		void HashCuckooRep::Get(const LookupKey& key, void* callback_args,
-//			bool(*callback_func)(void* arg, const char* entry)) {
-//			Slice user_key = key.user_key();
-//			Slice internal_key = key.internal_key();
-//#ifdef TEKS_DEBUG
-//			cout << "HashCuckoo::" << __FUNCTION__ << endl;
-//			//KeyIndex::Node* vk = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
-//			PrintKey(key.memtable_key().data());
-//#endif
-//			//GetFromIndexTable(key, callback_args, callback_func);
-//			for (unsigned int hid = 0; hid < hash_function_count_; ++hid) {
-//				const char* bucket =
-//					cuckoo_array_[GetHash(user_key, hid)].load(std::memory_order_acquire);
-//				if (bucket != nullptr) {
-//					Slice bucket_user_key = UserKey(bucket);
-//					if (bucket_user_key==user_key) {
-//						const uint64_t bucket_seq = GetSequenceNum(bucket);
-//						const uint64_t userkey_seq = DecodeFixed64(internal_key.data() + internal_key.size() - 8) >> 8;
-//						if (bucket_seq <= userkey_seq) {
-//							// mem_key 의 Seq와 비교했을때 Seq가 같거나 크면 됨.
-//							callback_func(callback_args, bucket);
-//							return;
-//						}
-//						else {
-//							// 만약 overwrite 되었으면 IndexSkiplist에서 찾아줘야함.
-//							GetFromIndexTable(key, callback_args, callback_func);
-//							break;
-//						}
-//					}
-//				}
-//				else {
-//					// as Put() always stores at the vacant bucket located by the
-//					// hash function with the smallest possible id, when we first
-//					// find a vacant bucket in Get(), that means a miss.
-//					break;
-//				}
-//			}
-//
-//
-//			MemTableRep* backup_table = backup_table_.get();
-//			if (backup_table != nullptr) {
-//				// 백업테이블은 애초에 Append 방식이라서 유지 잘되어있음.
-//				// Get에서는 Cuckoo 해시에서만 분기시켜주자.
-//				backup_table->Get(key, callback_args, callback_func);
-//			}
-//		}
-
 
 		inline void HashCuckooRep::InsertJob(const IndexJob& job) {
 			static const float kBackgroundworkerThreshhold = 0.15f;
@@ -1568,9 +1541,15 @@ namespace rocksdb {
 					if (ukey == bucket_user_key) {
 						auto hint = list_->yul_index_array_[HashId].load(std::memory_order_acquire);
 						if (hint != nullptr) {
+#ifdef TEKS_DEBUG
+							list_->teks_node_iter_seek_shortcut_hit_count.fetch_add(1);
+#endif
 							cit_->Seek(encoded_key, hint);
 						}
 						else {
+#ifdef TEKS_DEBUG
+							list_->teks_node_iter_seek_shortcut_miss_count.fetch_add(1);
+#endif
 							cit_->Invalidate();
 						}
 						return;
@@ -1811,7 +1790,7 @@ namespace rocksdb {
 	{
 		while (true) {
 			// 2 초마다 깨워준다.
-			std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+			std::this_thread::sleep_for(std::chrono::milliseconds(10000));
 			cuckoo->PrintInternalStats();
 			if (cuckoo->yul_background_worker_terminate.load(std::memory_order_acquire)) {
 				cuckoo->yul_background_worker_done = true;
