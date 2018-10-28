@@ -1,5 +1,6 @@
 // This is Teks_Shortcut_ConcurrentSkiplist_inplaceupdate Version
 #define TEKS_FREESPACE 1
+//#define TEKS_BUSY 1
 //#define TEKS_DEBUG 1
 //#define TEKS_DEBUG_OPERATION 1
 #ifndef YUIL
@@ -575,6 +576,37 @@ namespace rocksdb {
 				}
 			}
 
+			void TeksShortcutUpdate(KeyIndex::Node* index, const unsigned int& bid, const char* key) {
+				if (index == nullptr) return;
+				while (true) {
+					// Hint는 무조건 최신버전 이여야함
+					KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
+					if (hint != nullptr) {
+						uint64_t hkey = GetSequenceNum(hint->Key());
+						uint64_t ikey = GetSequenceNum(key);
+						if (hkey < ikey) {
+							if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+								break;
+							}
+							else {
+								continue;
+							}
+						}
+						else {
+							break;
+						}
+					}
+					else {
+						if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
+							break;
+						}
+						else {
+							continue;
+						}
+					}
+				}
+			}
+
 			void TeksFreeSpaceInsert(char* key) {
 				uint64_t offset = 0;
 				
@@ -652,35 +684,7 @@ namespace rocksdb {
 						}
 						// Index array update
 						if (job.Type == kIndexJobBucket && index != nullptr) {
-							while (true) {
-								// Hint는 무조건 최신버전 이여야함
-								KeyIndex::Node* hint = yul_index_array_[bid].load(std::memory_order_acquire);
-								if (hint != nullptr) {
-									uint64_t hkey = GetSequenceNum(hint->Key());
-									uint64_t ikey = GetSequenceNum(key);
-									if (hkey < ikey) {
-										if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-											break;
-										}
-										else {
-											continue;
-										}
-									}
-									else {
-										break;
-									}
-								}
-								else {
-									if (yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-										break;
-									}
-									else {
-										continue;
-									}
-								}
-							}
-							//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-							//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+							TeksShortcutUpdate(index, bid, key);
 						}
 						else if (job.Type == kIndexJobCollisionModification) {
 							yul_index_array_[bid].store(index, std::memory_order_release);
@@ -1109,7 +1113,9 @@ namespace rocksdb {
 		bool HashCuckooRep::QuickInsertConcurrently(const char* internal_key, const Slice& user_key,
 			int bucket_ids[], const int initial_hash_id) {
 			const char* stored_key = nullptr;
-
+			bool having_reader =
+				yul_snapshot_count.load(std::memory_order_relaxed) == 0 ?
+				false : true;
 			// 일단 Key값에 대해 Hash ID 구함
 			for (unsigned int hid = initial_hash_id; hid < hash_function_count_; ++hid) {
 				bucket_ids[hid] = GetHash(user_key, hid);
@@ -1167,10 +1173,17 @@ namespace rocksdb {
 							return true;
 						}
 
-						//if (yul_snapshot_count.load(std::memory_order_relaxed) >= 1) {
+#ifdef TEKS_BUSY
+						if (having_reader) {
+							KeyIndex::Node* index = InsertIndexData(internal_key, cuckoo_bucket_id);
+							TeksShortcutUpdate(index, cuckoo_bucket_id, internal_key);
+						}
+						else {
+							InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+						}
+#else
 						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
-						//}
-						// 하고나면 끝
+#endif
 						return true;
 					}
 				}
@@ -1183,7 +1196,17 @@ namespace rocksdb {
 					if (cuckoo_array_[cuckoo_bucket_id].compare_exchange_weak(st_key, const_cast<char*>(internal_key))) {
 						// 만약 빈공간에 넣는게 성공했으면
 						//InsertIndexData(internal_key, cuckoo_bucket_id);
+#ifdef TEKS_BUSY
+						if (having_reader) {
+							KeyIndex::Node* index = InsertIndexData(internal_key, cuckoo_bucket_id);
+							TeksShortcutUpdate(index, cuckoo_bucket_id, internal_key);
+						}
+						else {
+							InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+						}
+#else
 						InsertJobConcurrently(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+#endif
 						return true;
 					}
 					else {
@@ -1198,6 +1221,9 @@ namespace rocksdb {
 			int bucket_ids[], const int initial_hash_id) {
 			int cuckoo_bucket_id = -1;
 			bool is_key_update = false;
+			bool having_reader =
+				yul_snapshot_count.load(std::memory_order_relaxed) == 0 ?
+				false : true;
 			// Below does the followings:
 			// 0. Calculate all possible locations of the input key.
 			// 1. Check if there is a bucket having same user_key as the input does.
@@ -1233,7 +1259,7 @@ namespace rocksdb {
 
 				while (true) {
 					KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-					if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+					if (hint != nullptr && having_reader) {
 						uint64_t hkey = GetSequenceNum(hint->Key());
 						uint64_t ikey = GetSequenceNum(internal_key);
 						if (ikey > hkey) {
@@ -1244,7 +1270,17 @@ namespace rocksdb {
 						}
 						return true;
 					}
+#ifdef TEKS_BUSY
+					if (having_reader) {
+						KeyIndex::Node* index = InsertIndexData(internal_key, cuckoo_bucket_id);
+						TeksShortcutUpdate(index, cuckoo_bucket_id, internal_key);
+					}
+					else {
+						InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+					}
+#else
 					InsertJob(IndexJob(internal_key, static_cast<unsigned int>(cuckoo_bucket_id), kIndexJobBucket));
+#endif
 					return true;
 				}
 			}
@@ -1744,35 +1780,7 @@ namespace rocksdb {
 					}
 					// Index array update
 					if (job.Type == kIndexJobBucket && index != nullptr) {
-						while (true) {
-							// Hint는 무조건 최신버전 이여야함
-							KeyIndex::Node* hint = cuckoo->yul_index_array_[bid].load(std::memory_order_acquire);
-							if (hint != nullptr) {
-								uint64_t hkey = cuckoo->GetSequenceNum(hint->Key());
-								uint64_t ikey = cuckoo->GetSequenceNum(key);
-								if (hkey < ikey) {
-									if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-										break;
-									}
-									else {
-										continue;
-									}
-								}
-								else {
-									break;
-								}
-							}
-							else {
-								if (cuckoo->yul_index_array_[bid].compare_exchange_weak(hint, index, std::memory_order_release)) {
-									break;
-								}
-								else {
-									continue;
-								}
-							}
-						}
-						//printf("Make Shortcut ! BucketID : %zd",bid);PrintKey(key);
-						//cuckoo->yul_index_array_[bid].store(index,std::memory_order_release);
+						cuckoo->TeksShortcutUpdate(index, bid, key);
 					}
 					else if (job.Type == kIndexJobCollisionModification) {
 						// collision modifying
