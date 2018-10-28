@@ -1083,6 +1083,7 @@ namespace rocksdb {
 				teks_node_insert_count.fetch_add(1);
 			}
 #endif
+
 			return KeyIndex_.UpdateNode(internal_key, hint);
 			//return KeyIndex_.InsertIndex(internal_key, bucket_id);
 		}

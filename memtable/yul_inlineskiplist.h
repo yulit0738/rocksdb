@@ -130,6 +130,9 @@ namespace rocksdb {
 				// Hiht 가 없다는 말은 해당 Node가 아직 업데이트 안된거임.
 				return InsertConcurrently(key);
 			}
+#ifdef TEKS_INPLACE_MUTEX
+			std::unique_lock<std::mutex> lock(inplace_mutex_);
+#endif
 			auto org = GetSequenceNum(hint->Key());
 			auto upd = GetSequenceNum(key);
 			if (org < upd) {
