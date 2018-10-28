@@ -59,7 +59,9 @@ namespace rocksdb {
 	class YulInlineSkipList {
 	public:
 		struct Node;
-		//std::mutex inplace_mutex_;
+#ifdef TEKS_INPLACE_MUTEX
+		std::mutex inplace_mutex_;
+#endif
 	private:
 		struct Splice;
 
@@ -351,10 +353,9 @@ namespace rocksdb {
 
 		void StashKey(const char* key) {
 			assert(sizeof(const char*) <= sizeof(next_[1]));
-			//memcpy(&next_[0], &key, sizeof(const char*));
-			/*
-			struct std::atomic<Node *> *
-			*/
+#ifdef TEKS_INPLACE_MUTEX
+			memcpy(&next_[0], &key, sizeof(const char*));
+#else
 			while (true) {
 				std::atomic<Node*>* target = &next_[0];
 				Node* orig = next_[0].load(std::memory_order_relaxed);
@@ -375,16 +376,7 @@ namespace rocksdb {
 					}
 				}
 			}
-
-			/*auto exp = next_[0].load(std::memory_order_relaxed);
-			std::atomic_compare_exchange_weak_explicit(
-			&target,
-			&exp,
-			key,
-			std::memory_order_release,
-			std::memory_order_relaxed);
-			*///std::atomic<Node>* p = &next_[0];
-
+#endif
 		}
 
 		// Retrieves the value passed to StashHeight.  Undefined after a call

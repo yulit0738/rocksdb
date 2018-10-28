@@ -1,5 +1,6 @@
 // This is Teks_Shortcut_ConcurrentSkiplist_inplaceupdate Version
 #define TEKS_FREESPACE 1
+#define TEKS_INPLACE_MUTEX 1
 //#define TEKS_BUSY 1
 //#define TEKS_DEBUG 1
 //#define TEKS_DEBUG_OPERATION 1
@@ -529,32 +530,9 @@ namespace rocksdb {
 			};
 
 			void IndexInplaceUpdate(KeyIndex::Node* shortcut, const char* key) {
-				//while (true) {
-				//	KeyIndex::Node* orig = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(shortcut->Key())) - 1;
-				//	KeyIndex::Node* value = reinterpret_cast<KeyIndex::Node*>(const_cast<char*>(key)) - 1;
-				//	std::atomic<KeyIndex::Node*> p(shortcut);
-				//	if (orig == nullptr) {
-				//		if (p.compare_exchange_weak(orig, value)) break;
-				//	}
-				//	else {
-				//		/* 이미 있는값이면 Seq 가 더 낮은걸 업데이트 해야함. */
-				//		auto org = GetSequenceNum(shortcut->Key());
-				//		auto upd = GetSequenceNum(key);
-				//		if (org < upd) {
-				//			printf("Origin : "); PrintKey(shortcut->Key());
-				//			if (p.compare_exchange_weak(orig, value)) {
-				//				printf("Update : "); PrintKey(key);
-				//				break;
-				//			}
-				//		}
-				//		else {
-				//			/* Update 하려는 Object의 Sequence 가 적으면 Skip */
-				//			break;
-				//		}
-				//	}
-				//}
-
-				//std::unique_lock<std::mutex> lock(KeyIndex_.inplace_mutex_);
+#ifdef TEKS_INPLACE_MUTEX
+				std::unique_lock<std::mutex> lock(KeyIndex_.inplace_mutex_);
+#endif
 				const char* t = shortcut->UnstashKey();
 				auto org = GetSequenceNum(shortcut->Key());
 				auto upd = GetSequenceNum(key);
@@ -566,6 +544,9 @@ namespace rocksdb {
 					shortcut->StashKey(key);
 #ifdef TEKS_DEBUG
 					teks_node_foreground_update_count.fetch_add(1);
+#endif
+#ifdef TEKS_INPLACE_MUTEX
+					lock.unlock();
 #endif
 					if (t != nullptr) {
 						// Skiplist Node 에 속해있는 Entry 가 아닌 경우에만 Victim Key로 선정될 수 있다.
@@ -1161,7 +1142,7 @@ namespace rocksdb {
 					(st_key, const_cast<char*>(internal_key)) != true);
 					while (true) {
 						KeyIndex::Node* hint = yul_index_array_[cuckoo_bucket_id];
-						if (hint != nullptr && yul_snapshot_count.load(std::memory_order_relaxed) == 0) {
+						if (hint != nullptr && having_reader) {
 							uint64_t hkey = GetSequenceNum(hint->Key());
 							uint64_t ikey = GetSequenceNum(internal_key);
 							if (ikey > hkey) {
